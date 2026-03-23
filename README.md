@@ -232,7 +232,7 @@ frontend/src/
 |---|---|---|
 | `./logs/` | `/app/logs` | Rotating log files (10 MB, 7 days, gzip) |
 | `./backend/data/` | `/app/backend/data` | `trading.db` — all trades, decisions, metrics |
-| `kraken_state` (named volume) | `/root/.config/kraken` | Kraken CLI paper trading balance |
+| `~/Library/Application Support/kraken` (macOS) | `/root/.local/share/kraken` | Kraken CLI paper trading balance + state |
 
 ## License
 

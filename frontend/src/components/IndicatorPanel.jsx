@@ -12,7 +12,8 @@ import InfoTooltip from './InfoTooltip.jsx'
 async function fetchLatestDecision() {
   // Fetch enough to skip fast-loop records (timeframe=15, no llm_reasoning)
   const response = await api.get('/api/decisions', { params: { limit: 20 } })
-  const stdDecision = response.data.find((d) => d.timeframe !== 15 && d.llm_reasoning)
+  // Skip fast-loop records (timeframe=15); confluence-skip records are valid for indicators
+  const stdDecision = response.data.find((d) => d.timeframe !== 15)
   return stdDecision || null
 }
 

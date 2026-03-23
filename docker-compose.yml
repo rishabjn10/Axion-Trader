@@ -11,12 +11,18 @@ services:
     environment:
       # Override CORS so the frontend container (port 3000) is allowed
       CORS_ORIGINS: "http://localhost:3000"
+      # Disable numba JIT — pandas_ta's nb_sma fails to compile on Linux/ARM64 + Python 3.13
+      NUMBA_DISABLE_JIT: "1"
     volumes:
       # Persist logs and SQLite DB at the same relative paths as local dev
       - ./logs:/app/logs
       - ./backend/data:/app/backend/data
-      # Persist kraken CLI paper-trading state (balance, orders) across restarts
-      - kraken_state:/root/.config/kraken
+      # macOS stores kraken state in ~/Library/Application Support/kraken
+      # Linux (Docker) uses XDG path ~/.local/share/kraken — mount Mac → Linux
+      - "~/Library/Application Support/kraken:/root/.local/share/kraken"
+    # Init paper account on first run (no-op if already initialized)
+    command: >
+      sh -c "kraken paper init 2>/dev/null || true && python backend/main.py"
     ports:
       - "8000:8000"
     healthcheck:
@@ -39,6 +45,3 @@ services:
       backend:
         condition: service_healthy
 
-# Named volume for kraken CLI config/paper state
-volumes:
-  kraken_state:
