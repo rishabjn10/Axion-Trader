@@ -124,6 +124,7 @@ class DecisionResponse(BaseModel):
     approved_by_risk: bool
     confluence_score: int | None
     risk_rejection_reason: str | None
+    timeframe: int | None
     rsi: float | None
     macd_cross: str | None
     bb_position: str | None
@@ -366,6 +367,7 @@ async def get_decisions(
             approved_by_risk=bool(d.get("approved_by_risk", 0)),
             confluence_score=d.get("confluence_score"),
             risk_rejection_reason=d.get("risk_rejection_reason"),
+            timeframe=d.get("timeframe"),
             rsi=d.get("rsi"),
             macd_cross=d.get("macd_cross"),
             bb_position=d.get("bb_position"),

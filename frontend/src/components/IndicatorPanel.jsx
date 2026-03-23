@@ -2,7 +2,8 @@
  * @fileoverview Live technical indicator panel with tooltips and confluence signal breakdown.
  */
 
-import React from 'react'
+
+import { useRef } from 'react'
 import clsx from 'clsx'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../lib/api.js'
@@ -11,9 +12,9 @@ import InfoTooltip from './InfoTooltip.jsx'
 
 async function fetchLatestDecision() {
   // Fetch enough to skip fast-loop records (timeframe=15, no llm_reasoning)
-  const response = await api.get('/api/decisions', { params: { limit: 20 } })
-  // Skip fast-loop records (timeframe=15); confluence-skip records are valid for indicators
-  const stdDecision = response.data.find((d) => d.timeframe !== 15)
+  const response = await api.get('/api/decisions', { params: { limit: 100 } })
+  // Skip fast-loop records (timeframe=15); require rsi > 0 so partial/zero records are ignored
+  const stdDecision = response.data.find((d) => d.timeframe !== 15 && d.rsi > 0)
   return stdDecision || null
 }
 
@@ -188,19 +189,23 @@ function ConfluenceBreakdown({ breakdown }) {
 
 export default function IndicatorPanel() {
   const { data: agentState } = useAgentState()
+  const lastGoodDecision = useRef(null)
 
   const { data: latestDecision } = useQuery({
     queryKey: ['latestDecision'],
     queryFn: fetchLatestDecision,
     refetchInterval: 5_000,
-    placeholderData: (prev) => prev,
   })
 
-  const rsi = latestDecision?.rsi ?? null
-  const confluenceScore = latestDecision?.confluence_score ?? 0
-  const confluenceBreakdown = latestDecision?.confluence_breakdown ?? []
-  const macdCross = latestDecision?.macd_cross || 'none'
-  const bbPosition = latestDecision?.bb_position || 'MIDDLE'
+  // Only advance to a new decision if it has real data — never regress to null/zeros
+  if (latestDecision?.rsi > 0) lastGoodDecision.current = latestDecision
+  const decision = lastGoodDecision.current
+
+  const rsi = decision?.rsi ?? null
+  const confluenceScore = decision?.confluence_score ?? 0
+  const confluenceBreakdown = decision?.confluence_breakdown ?? []
+  const macdCross = decision?.macd_cross || '-'
+  const bbPosition = decision?.bb_position || '-'
   const lastPrice = agentState?.last_price || 0
   const regime = agentState?.regime || '—'
 
