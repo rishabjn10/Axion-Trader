@@ -1,0 +1,71 @@
+# Environment — NEVER commit secrets
+.env
+.env.local
+.env.*.local
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# Virtual environments (PDM managed)
+.venv/
+.pdm-venv/
+venv/
+env/
+
+# PDM — pdm.lock IS committed for reproducibility
+.pdm-python
+.pdm-build/
+__pypackages__/
+
+# Database files — contain live trading data
+*.db
+*.sqlite
+*.sqlite3
+backend/data/trading.db*
+
+# State files
+state.json
+positions.json
+
+# Logs
+logs/
+*.log
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Node / Frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+dist/
+.vite/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# MyPy
+.mypy_cache/
+.claude/

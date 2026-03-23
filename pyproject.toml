@@ -1,0 +1,33 @@
+[project]
+name = "kraken-ai-trader"
+version = "0.1.0"
+description = "Autonomous AI trading agent — Kraken CLI + Gemini Flash"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.5.0",
+    "google-genai>=1.5.0",
+    "langtrace-python-sdk>=3.3.0",
+    "pandas>=2.2.3",
+    "pandas-ta>=0.3.14b",
+    "numpy>=2.0.0",
+    "requests>=2.32.0",
+    "websockets>=13.1",
+    "schedule>=1.2.2",
+    "python-dotenv>=1.0.1",
+    "loguru>=0.7.2",
+    "rich>=13.9.0",
+    "aiofiles>=23.2.0",
+    "setuptools>=70.0.0",
+]
+
+[tool.pdm.scripts]
+start = "python backend/main.py"
+api   = "uvicorn backend.api.app:app --reload --port 8000"
+agent = "python backend/main.py --agent-only"
+
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
