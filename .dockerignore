@@ -1,0 +1,24 @@
+.git
+.venv
+.pdm-build
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Frontend build artifacts (built inside Docker)
+frontend/node_modules
+frontend/dist
+
+# Local DB and logs (bind-mounted at runtime)
+backend/data/trading.db
+backend/data/trading.db-wal
+backend/data/trading.db-shm
+logs/
+
+# Secrets / local config
+.env
+.claude

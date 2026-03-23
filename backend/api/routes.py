@@ -88,6 +88,7 @@ class TradeResponse(BaseModel):
     mode: str
     stop_price: float
     take_profit_price: float
+    closed_at: str | None
     llm_reasoning: str | None
 
 
@@ -294,6 +295,7 @@ async def get_trades(
             mode=t.get("mode", "paper"),
             stop_price=float(t.get("stop_price") or 0.0),
             take_profit_price=float(t.get("take_profit_price") or 0.0),
+            closed_at=t.get("closed_at"),
             llm_reasoning=t.get("llm_reasoning"),
         )
         for t in trades

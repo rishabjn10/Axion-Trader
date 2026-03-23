@@ -240,6 +240,17 @@ async def _check_stops_and_tp(current_price: float) -> None:
                     pnl_pct=round(pnl_pct, 4),
                     closed_at=now_ts,
                 )
+
+                # The exit order itself was saved as a new "open" trade by place_order.
+                # Immediately mark it closed so it doesn't pollute open-position counts.
+                update_trade_exit(
+                    order_id=close_result.order_id,
+                    exit_price=exit_px,
+                    pnl_usd=0.0,
+                    pnl_pct=0.0,
+                    closed_at=now_ts,
+                )
+
                 logger.info(
                     f"{triggered} closed | order={order_id} | "
                     f"PnL=${pnl_usd:+.2f} ({pnl_pct:+.2f}%)"

@@ -123,6 +123,9 @@ function TradeRow({ trade, isFirst }) {
                   )}
                   <span>Volume: <span className="text-slate-300">{trade.volume?.toFixed(6)} BTC</span></span>
                   <span>Mode: <span className={trade.mode === 'live' ? 'text-green-400' : 'text-amber-400'}>{trade.mode?.toUpperCase()}</span></span>
+                  {trade.closed_at && (
+                    <span>Closed: <span className="text-slate-300">{new Date(trade.closed_at).toLocaleString()}</span></span>
+                  )}
                   <span>Order ID: <span className="text-slate-400">{trade.order_id}</span></span>
                 </div>
               )}

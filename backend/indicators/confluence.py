@@ -41,7 +41,7 @@ from backend.indicators.engine import IndicatorSnapshot
 # Confluence threshold — must be tuned carefully to balance sensitivity/specificity
 # Production: 5 (high conviction, fewer false signals)
 # Testing/validation: 3 (passes current bearish market conditions for pipeline validation)
-_CONFLUENCE_THRESHOLD = 3
+_CONFLUENCE_THRESHOLD = 5
 
 
 class ConfluentSignal(BaseModel):

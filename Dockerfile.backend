@@ -1,0 +1,37 @@
+FROM python:3.13-slim
+
+WORKDIR /app
+
+# System build deps (needed for pandas/numpy C extensions)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Install Python deps ────────────────────────────────────────────────────────
+# Copy manifest first so this layer is cached unless deps change
+COPY pyproject.toml pdm.lock ./
+
+# pip can build from pyproject.toml directly (pdm-backend is auto-fetched)
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir .
+
+# ── Install kraken CLI ─────────────────────────────────────────────────────────
+RUN curl --proto '=https' --tlsv1.2 -LsSf \
+    https://github.com/krakenfx/kraken-cli/releases/latest/download/kraken-cli-installer.sh \
+    | sh && \
+    # The installer puts the binary in ~/.cargo/bin — symlink to PATH
+    ln -sf /root/.cargo/bin/kraken /usr/local/bin/kraken
+
+# ── Application source ─────────────────────────────────────────────────────────
+COPY backend/ ./backend/
+
+# These dirs are bind-mounted at runtime (see docker-compose.yml)
+RUN mkdir -p logs backend/data
+
+ENV PYTHONPATH=/app
+
+EXPOSE 8000
+
+CMD ["python", "backend/main.py"]
