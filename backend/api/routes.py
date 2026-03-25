@@ -508,3 +508,21 @@ async def set_mode(request: ModeRequest) -> ModeResponse:
         mode=new_mode,
         message=f"Trading mode switched to {new_mode.upper()}. Takes effect on next cycle.",
     )
+
+
+@router.get("/config", summary="Active trading configuration")
+async def get_config() -> dict[str, Any]:
+    """Return all user-configurable thresholds and intervals from .env."""
+    return {
+        "trading_pair": settings.trading_pair,
+        "trading_mode": settings.trading_mode,
+        "confluence_min_score": settings.confluence_min_score,
+        "confidence_threshold": settings.confidence_threshold,
+        "max_position_pct": settings.max_position_pct,
+        "stop_loss_pct": settings.stop_loss_pct,
+        "daily_loss_limit_pct": settings.daily_loss_limit_pct,
+        "max_open_positions": settings.max_open_positions,
+        "fast_loop_minutes": settings.fast_loop_minutes,
+        "standard_loop_minutes": settings.standard_loop_minutes,
+        "trend_loop_minutes": settings.trend_loop_minutes,
+    }

@@ -35,13 +35,11 @@ from typing import Literal
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.config.settings import settings as _settings
 from backend.data.sentiment import SentimentSnapshot
 from backend.indicators.engine import IndicatorSnapshot
 
-# Confluence threshold — must be tuned carefully to balance sensitivity/specificity
-# Production: 5 (high conviction, fewer false signals)
-# Testing/validation: 3 (passes current bearish market conditions for pipeline validation)
-_CONFLUENCE_THRESHOLD = 5
+_CONFLUENCE_THRESHOLD = _settings.confluence_min_score
 
 
 class ConfluentSignal(BaseModel):

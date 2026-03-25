@@ -114,6 +114,12 @@ class Settings(BaseSettings):
         le=10,
         description="Maximum number of simultaneously open positions across all pairs.",
     )
+    confluence_min_score: int = Field(
+        default=3,
+        ge=1,
+        le=8,
+        description="Minimum confluence score (out of 8) required to proceed past the confluence gate to the AI cycle.",
+    )
 
     # ── Cycle intervals (override for testing) ────────────────────────────────
     fast_loop_minutes: int = Field(

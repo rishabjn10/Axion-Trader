@@ -10,6 +10,11 @@ import { api } from '../lib/api.js'
 import { useAgentState } from '../hooks/useAgentState.js'
 import InfoTooltip from './InfoTooltip.jsx'
 
+async function fetchConfig() {
+  const response = await api.get('/api/config')
+  return response.data
+}
+
 async function fetchLatestDecision() {
   // Fetch enough to skip fast-loop records (timeframe=15, no llm_reasoning)
   const response = await api.get('/api/decisions', { params: { limit: 100 } })
@@ -38,16 +43,17 @@ function IndicatorWidget({ label, tooltip, value, badge, badgeClass, detail }) {
   )
 }
 
-function ConfluenceWidget({ score, max = 8 }) {
+function ConfluenceWidget({ score, threshold = 3, max = 8 }) {
   const pct = (score / max) * 100
-  const colour = score >= 5 ? 'bg-green-400' : score >= 3 ? 'bg-amber-400' : 'bg-red-400'
+  const passes = score >= threshold
+  const colour = passes ? 'bg-green-400' : score >= Math.floor(threshold / 2) ? 'bg-amber-400' : 'bg-red-400'
 
   return (
     <div className="bg-[#16213e] rounded-lg p-3 space-y-1.5">
       <div className="flex items-center">
         <p className="text-xs text-slate-500 uppercase tracking-wider">Confluence</p>
         <InfoTooltip
-          text="8 independent signals voted: RSI, MACD, Bollinger Bands, VWAP, EMA cross, Fear & Greed, news sentiment, and ADX. Score ≥5/8 required to unlock the AI decision cycle. Below 5, the agent skips the cycle entirely — no Gemini call, no trade."
+          text={`8 independent signals voted: RSI, MACD, Bollinger Bands, VWAP, EMA cross, Fear & Greed, news sentiment, and ADX. Score ≥${threshold}/8 required to unlock the AI decision cycle. Below ${threshold}, the agent skips the cycle entirely — no Gemini call, no trade.`}
           wide
         />
       </div>
@@ -57,13 +63,11 @@ function ConfluenceWidget({ score, max = 8 }) {
         </p>
         <span className={clsx(
           'text-xs px-1.5 py-0.5 rounded font-medium border',
-          score >= 5
+          passes
             ? 'text-green-400 bg-green-400/10 border-green-400/30'
-            : score >= 3
-            ? 'text-amber-400 bg-amber-400/10 border-amber-400/30'
             : 'text-red-400 bg-red-400/10 border-red-400/30'
         )}>
-          {score >= 5 ? 'PASSES' : 'BELOW'}
+          {passes ? 'PASSES' : 'BELOW'}
         </span>
       </div>
       <div className="w-full bg-[#2d2d4e] rounded-full h-1.5">
@@ -72,7 +76,7 @@ function ConfluenceWidget({ score, max = 8 }) {
           style={{ width: `${pct}%` }}
         />
       </div>
-      <p className="text-xs text-slate-500">Minimum 5/8 to trade</p>
+      <p className="text-xs text-slate-500">Minimum {threshold}/8 to trade</p>
     </div>
   )
 }
@@ -191,6 +195,13 @@ export default function IndicatorPanel() {
   const { data: agentState } = useAgentState()
   const lastGoodDecision = useRef(null)
 
+  const { data: config } = useQuery({
+    queryKey: ['config'],
+    queryFn: fetchConfig,
+    staleTime: 60_000,   // config rarely changes — refetch every minute is enough
+    refetchInterval: 60_000,
+  })
+
   const { data: latestDecision } = useQuery({
     queryKey: ['latestDecision'],
     queryFn: fetchLatestDecision,
@@ -251,7 +262,7 @@ export default function IndicatorPanel() {
           detail="20-period, 2σ"
         />
 
-        <ConfluenceWidget score={confluenceScore} />
+        <ConfluenceWidget score={confluenceScore} threshold={config?.confluence_min_score ?? 3} />
 
         <IndicatorWidget
           label="Last Price"
