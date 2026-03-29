@@ -372,7 +372,10 @@ async def run_fast_loop() -> None:
 
                         if approval.approved:
                             volume = round(approval.position_size_usd / snap_15m.current_price, 6)
-                            trade_result = place_order(rule_decision.action, volume, settings.trading_pair)
+                            trade_result = place_order(
+                                rule_decision.action, volume, settings.trading_pair,
+                                signal_price=snap_15m.current_price,
+                            )
 
                             # Save stop/TP — trader.py initialises them to 0
                             if trade_result.success:
@@ -515,14 +518,18 @@ async def _run_full_cycle(cycle_ts: str) -> None:
     """
     from backend.brain.aggregator import aggregate
     from backend.brain.gemini import GeminiDecision, MarketSnapshot, get_decision
+    from backend.brain.narrative import get_narrative
     from backend.brain.reflection import get_reflection_context
     from backend.brain.rules import evaluate
     from backend.data.fetcher import fetch_balance, fetch_ohlcv, fetch_open_orders
+    from backend.data.market_data import get_microstructure
     from backend.data.sentiment import get_sentiment_snapshot
+    from backend.execution.shock_guard import shock_guard
     from backend.execution.trader import place_order
     from backend.indicators.confluence import score as confluence_score
     from backend.indicators.engine import compute_indicators
     from backend.indicators.regime import detect_regime
+    from backend.indicators.volume_profile import compute_volume_profile
     from backend.memory.store import save_decision, save_portfolio_snapshot, save_trade
     from backend.risk.guard import (
         approve_trade,
@@ -570,13 +577,59 @@ async def _run_full_cycle(cycle_ts: str) -> None:
     sentiment = get_sentiment_snapshot()
     logger.info(f"Sentiment: F&G={sentiment.fear_greed_value} ({sentiment.fear_greed_classification}), news={sentiment.overall_news_sentiment}")
 
+    # ── Step 4b: Detect regime early (needed for regime-conditional confluence) ─
+    logger.info("Detecting market regime…")
+    regime_ctx = detect_regime(df_1h, df_4h)
+    set_state("current_regime", regime_ctx.regime.value)
+    logger.info(f"Regime: {regime_ctx.regime.value} (ADX={regime_ctx.adx_value:.1f})")
+
+    # VOLATILE regime: stand aside entirely, no new trades
+    if regime_ctx.regime.stand_aside:
+        logger.warning(f"VOLATILE regime detected — standing aside, skipping cycle")
+        save_decision({
+            "timestamp": cycle_ts, "pair": settings.trading_pair,
+            "rsi": primary_snap.rsi, "final_action": "hold",
+            "final_confidence": 0.0, "consensus_reached": False,
+            "approved_by_risk": False,
+            "risk_rejection_reason": f"VOLATILE regime (ATR z={regime_ctx.atr_z_score:.2f}) — stand aside",
+        })
+        return
+
+    # ── Step 4c: Fetch microstructure data (funding rate, L/S ratio, correlations) ─
+    logger.info("Fetching microstructure data…")
+    try:
+        microstructure = get_microstructure(settings.trading_pair)
+    except Exception as exc:
+        logger.warning(f"Microstructure fetch failed: {exc} — proceeding without it")
+        microstructure = None
+
+    # ── Step 4d: Compute volume profile (POC / value area) ────────────────────
+    try:
+        volume_profile = compute_volume_profile(df_1h)
+    except Exception as exc:
+        logger.warning(f"Volume profile compute failed: {exc} — proceeding without it")
+        volume_profile = None
+
+    # ── Step 4e: OFI from WebSocket shock guard ────────────────────────────────
+    ofi_score = shock_guard.ofi_score  # [-1.0, +1.0]; 0.0 if not yet connected
+    logger.debug(f"OFI score: {ofi_score:+.3f}")
+
     # ── Step 5: Score confluence ───────────────────────────────────────────────
-    confluence = confluence_score(primary_snap, sentiment)
-    logger.info(f"Confluence: {confluence.score}/8 ({confluence.dominant_direction}), passes={confluence.passes_threshold}")
+    confluence = confluence_score(
+        primary_snap, sentiment,
+        regime=regime_ctx.regime,
+        microstructure=microstructure,
+        volume_profile=volume_profile,
+    )
+    logger.info(
+        f"Confluence: {confluence.score}/{confluence.adaptive_threshold} "
+        f"({confluence.dominant_direction}), passes={confluence.passes_threshold} "
+        f"[regime: {confluence.regime_applied}]"
+    )
 
     # ── Step 6: Check confluence threshold ───────────────────────────────────
     if not confluence.passes_threshold:
-        logger.info(f"Insufficient confluence ({confluence.score}/8) — skipping cycle")
+        logger.info(f"Insufficient confluence ({confluence.score}/{confluence.adaptive_threshold}) — skipping cycle")
         save_decision({
             "timestamp": cycle_ts,
             "pair": settings.trading_pair,
@@ -589,15 +642,79 @@ async def _run_full_cycle(cycle_ts: str) -> None:
             "final_confidence": 0.0,
             "consensus_reached": False,
             "approved_by_risk": False,
-            "risk_rejection_reason": f"Insufficient confluence: {confluence.score}/8",
+            "risk_rejection_reason": f"Insufficient confluence: {confluence.score}/{confluence.adaptive_threshold}",
         })
         return
 
-    # ── Step 7: Detect market regime ──────────────────────────────────────────
-    logger.info("Detecting market regime…")
-    regime_ctx = detect_regime(df_1h, df_4h)
-    set_state("current_regime", regime_ctx.regime.value)
-    logger.info(f"Regime: {regime_ctx.regime.value} (ADX={regime_ctx.adx_value:.1f})")
+    # ── Step 7: Regime context already detected in Step 4b ────────────────────
+    # (regime_ctx is already set above)
+
+    # ── Step 7b: NarrativeContext from Gemini ─────────────────────────────────
+    logger.info("Getting Gemini narrative context…")
+    try:
+        funding_rate = microstructure.funding.funding_rate if (microstructure and microstructure.funding) else 0.0
+        funding_sentiment = microstructure.funding.sentiment if (microstructure and microstructure.funding) else "neutral"
+        ls_bias = microstructure.long_short.bias if (microstructure and microstructure.long_short) else "neutral"
+        risk_regime = microstructure.correlations.risk_regime if (microstructure and microstructure.correlations) else "decorrelated"
+
+        narrative = get_narrative(
+            price=primary_snap.current_price,
+            rsi=primary_snap.rsi,
+            confluence_score=confluence.score,
+            confluence_direction=confluence.dominant_direction,
+            regime=regime_ctx.regime.value,
+            sentiment=sentiment.overall_news_sentiment,
+            funding_rate=funding_rate,
+            funding_sentiment=funding_sentiment,
+            ls_bias=ls_bias,
+            risk_regime=risk_regime,
+        )
+        logger.info(
+            f"Narrative: bias={narrative.overall_bias}, "
+            f"conf_modifier={narrative.confidence_modifier:+.2f}, "
+            f"require_higher_confluence={narrative.require_higher_confluence}"
+        )
+    except Exception as exc:
+        logger.warning(f"NarrativeContext failed: {exc} — using neutral narrative")
+        from backend.brain.narrative import NarrativeContext
+        narrative = NarrativeContext(
+            overall_bias="neutral", tail_risks=[], catalysts=[],
+            invalidation_conditions=[], confidence_modifier=0.0,
+            require_higher_confluence=False, reasoning="Narrative unavailable",
+        )
+
+    # If narrative requires higher confluence, re-check with elevated threshold
+    if narrative.require_higher_confluence and not confluence.passes_threshold:
+        save_decision({
+            "timestamp": cycle_ts, "pair": settings.trading_pair,
+            "rsi": primary_snap.rsi, "confluence_score": confluence.score,
+            "confluence_breakdown": json.dumps(confluence.signal_breakdown),
+            "final_action": "hold", "final_confidence": 0.0,
+            "consensus_reached": False, "approved_by_risk": False,
+            "risk_rejection_reason": "Narrative requires higher confluence — threshold elevated",
+        })
+        return
+
+    if narrative.require_higher_confluence:
+        # Re-score with elevated threshold
+        confluence = confluence_score(
+            primary_snap, sentiment,
+            regime=regime_ctx.regime,
+            microstructure=microstructure,
+            volume_profile=volume_profile,
+            require_higher_confluence=True,
+        )
+        if not confluence.passes_threshold:
+            logger.info("Elevated confluence threshold not met — skipping cycle")
+            save_decision({
+                "timestamp": cycle_ts, "pair": settings.trading_pair,
+                "rsi": primary_snap.rsi, "confluence_score": confluence.score,
+                "confluence_breakdown": json.dumps(confluence.signal_breakdown),
+                "final_action": "hold", "final_confidence": 0.0,
+                "consensus_reached": False, "approved_by_risk": False,
+                "risk_rejection_reason": f"Elevated confluence threshold not met: {confluence.score}/{confluence.adaptive_threshold}",
+            })
+            return
 
     # ── Step 8: Get reflection context ───────────────────────────────────────
     reflection = get_reflection_context(limit=10)
@@ -640,6 +757,17 @@ async def _run_full_cycle(cycle_ts: str) -> None:
 
     # ── Step 11: Aggregate decisions ──────────────────────────────────────────
     final_decision = aggregate(llm_decision, rule_decision)
+
+    # Apply NarrativeContext confidence modifier (−0.3 to +0.3)
+    if narrative.confidence_modifier != 0.0:
+        adjusted_conf = max(0.0, min(1.0, final_decision.final_confidence + narrative.confidence_modifier))
+        logger.info(
+            f"Narrative confidence modifier: {final_decision.final_confidence:.2f} "
+            f"{narrative.confidence_modifier:+.2f} → {adjusted_conf:.2f}"
+        )
+        # Replace final_confidence with the adjusted value (Pydantic model is frozen — rebuild)
+        final_decision = final_decision.model_copy(update={"final_confidence": adjusted_conf})
+
     logger.info(f"Final: {final_decision.action} (conf={final_decision.final_confidence:.2f}, consensus={final_decision.consensus_reached})")
 
     # ── Step 12: Hold → save and continue ─────────────────────────────────────
@@ -753,7 +881,10 @@ async def _run_full_cycle(cycle_ts: str) -> None:
     volume = round(approval.position_size_usd / primary_snap.current_price, 6)
     logger.info(f"Executing {final_decision.action.upper()} order: {volume} {settings.trading_pair}")
 
-    trade_result = place_order(final_decision.action, volume, settings.trading_pair)
+    trade_result = place_order(
+        final_decision.action, volume, settings.trading_pair,
+        signal_price=primary_snap.current_price,
+    )
 
     # ── Step 17: Save complete records ────────────────────────────────────────
     decision_record = {

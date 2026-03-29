@@ -18,9 +18,13 @@ The rule engine is used in two ways:
 Rule priority order (first match wins — no multiple rules firing):
 1. RSI < 28 AND price ≤ lower BB AND MACD bullish cross → BUY (0.82)
 2. RSI > 72 AND price ≥ upper BB AND MACD bearish cross → SELL (0.82)
-3. EMA9 crossed above EMA21 AND regime = TRENDING_UP → BUY (0.78)
-4. EMA9 crossed below EMA21 AND regime = TRENDING_DOWN → SELL (0.78)
-5. Default → HOLD (0.0, rule="no_rule_triggered")
+3. EMA9 crossed above EMA21 AND regime.is_bullish → BUY (0.78)
+4. EMA9 crossed below EMA21 AND regime.is_bearish → SELL (0.78)
+5. EMA9 > EMA21 AND MACD histogram > 0 AND RSI 40-65 AND regime.is_bullish → BUY (0.72)
+6. EMA9 < EMA21 AND MACD histogram < 0 AND RSI 35-60 AND regime.is_bearish → SELL (0.72)
+7. RSI < 35 AND price < VWAP AND MACD histogram > 0 AND regime = RANGING → BUY (0.70)
+8. RSI > 65 AND price > VWAP AND MACD histogram < 0 AND regime = RANGING → SELL (0.70)
+9. Default → HOLD (0.0, rule="no_rule_triggered")
 
 Role in system: Tactical layer. Called by fast loop for immediate signals and
 by standard loop for consensus with the LLM.
@@ -134,11 +138,12 @@ def evaluate(snapshot: IndicatorSnapshot, regime: MarketRegime) -> RuleDecision:
             triggered_rule="RSI_overbought_BB_MACD",
         )
 
-    # ── Rule 3: EMA bullish cross in TRENDING_UP regime ───────────────────────
+    # ── Rule 3: EMA bullish cross in any uptrend regime ──────────────────────
     # EMA cross is only used as an entry signal when the macro regime confirms
     # the trend direction. This prevents EMA crosses from triggering in ranging markets.
+    # Accepts both TRENDING_UP_STRONG and TRENDING_UP_WEAK (regime.is_bullish).
     ema_bullish_cross = snapshot.ema_cross == "bullish"
-    in_uptrend = regime == MarketRegime.TRENDING_UP
+    in_uptrend = regime.is_bullish
 
     if ema_bullish_cross and in_uptrend:
         logger.info(
@@ -153,7 +158,7 @@ def evaluate(snapshot: IndicatorSnapshot, regime: MarketRegime) -> RuleDecision:
 
     # ── Rule 4: EMA bearish cross in TRENDING_DOWN regime ────────────────────
     ema_bearish_cross = snapshot.ema_cross == "bearish"
-    in_downtrend = regime == MarketRegime.TRENDING_DOWN
+    in_downtrend = regime.is_bearish  # MarketRegime.TRENDING_DOWN
 
     if ema_bearish_cross and in_downtrend:
         logger.info(
@@ -164,6 +169,79 @@ def evaluate(snapshot: IndicatorSnapshot, regime: MarketRegime) -> RuleDecision:
             action="sell",
             confidence=0.78,
             triggered_rule="EMA_cross_downtrend",
+        )
+
+    # ── Rule 5: EMA bullish state + MACD positive momentum + RSI mid-range ──────
+    # State-based (not event): EMA fast is ABOVE slow, MACD histogram is positive
+    # and accelerating. RSI in 40-65 means not yet overbought — room to run.
+    # Only in bullish regimes to avoid whipsaws in ranging/down markets.
+    ema_bullish_state = snapshot.ema_fast > snapshot.ema_slow
+    macd_positive     = snapshot.macd_histogram > 0
+    rsi_mid_bull      = 40 <= snapshot.rsi <= 65
+
+    if ema_bullish_state and macd_positive and rsi_mid_bull and regime.is_bullish:
+        logger.info(
+            f"Rule 5 fired: EMA_momentum_bull | EMA9={snapshot.ema_fast:.2f} > "
+            f"EMA21={snapshot.ema_slow:.2f}, MACD_hist={snapshot.macd_histogram:.4f}, "
+            f"RSI={snapshot.rsi:.1f}, regime={regime.value}"
+        )
+        return RuleDecision(
+            action="buy",
+            confidence=0.72,
+            triggered_rule="EMA_momentum_bull",
+        )
+
+    # ── Rule 6: EMA bearish state + MACD negative momentum + RSI mid-range ──────
+    ema_bearish_state = snapshot.ema_fast < snapshot.ema_slow
+    macd_negative     = snapshot.macd_histogram < 0
+    rsi_mid_bear      = 35 <= snapshot.rsi <= 60
+
+    if ema_bearish_state and macd_negative and rsi_mid_bear and regime.is_bearish:
+        logger.info(
+            f"Rule 6 fired: EMA_momentum_bear | EMA9={snapshot.ema_fast:.2f} < "
+            f"EMA21={snapshot.ema_slow:.2f}, MACD_hist={snapshot.macd_histogram:.4f}, "
+            f"RSI={snapshot.rsi:.1f}, regime={regime.value}"
+        )
+        return RuleDecision(
+            action="sell",
+            confidence=0.72,
+            triggered_rule="EMA_momentum_bear",
+        )
+
+    # ── Rule 7: RSI oversold bounce + price below VWAP in ranging market ─────────
+    # In ranging markets, RSI < 35 near the lower end of a range often means
+    # a bounce back to the mean is coming. VWAP below price confirms discount.
+    # Positive MACD histogram confirms the momentum is already turning.
+    rsi_oversold_soft = snapshot.rsi < 35
+    price_below_vwap  = snapshot.vwap > 0 and snapshot.current_price < snapshot.vwap
+    in_ranging        = regime == MarketRegime.RANGING
+
+    if rsi_oversold_soft and price_below_vwap and macd_positive and in_ranging:
+        logger.info(
+            f"Rule 7 fired: RSI_bounce_ranging | RSI={snapshot.rsi:.1f}, "
+            f"price={snapshot.current_price:.2f} < VWAP={snapshot.vwap:.2f}, "
+            f"MACD_hist={snapshot.macd_histogram:.4f}"
+        )
+        return RuleDecision(
+            action="buy",
+            confidence=0.70,
+            triggered_rule="RSI_bounce_ranging",
+        )
+
+    # ── Rule 8: RSI overbought fade + price above VWAP in ranging market ─────────
+    rsi_overbought_soft = snapshot.rsi > 65
+    price_above_vwap    = snapshot.vwap > 0 and snapshot.current_price > snapshot.vwap
+
+    if rsi_overbought_soft and price_above_vwap and macd_negative and in_ranging:
+        logger.info(
+            f"Rule 8 fired: RSI_fade_ranging | RSI={snapshot.rsi:.1f}, "
+            f"price={snapshot.current_price:.2f} > VWAP={snapshot.vwap:.2f}, "
+            f"MACD_hist={snapshot.macd_histogram:.4f}"
+        )
+        return RuleDecision(
+            action="sell",
+            confidence=0.70,
+            triggered_rule="RSI_fade_ranging",
         )
 
     # ── Default: no rule triggered ────────────────────────────────────────────

@@ -40,6 +40,115 @@ from pydantic import BaseModel, ConfigDict, Field
 from backend.config.settings import settings
 
 
+# ── Kelly Criterion position sizing ───────────────────────────────────────────
+
+def compute_kelly_position_pct(trades: list[dict]) -> float:
+    """
+    Compute Half Kelly position size from closed trade history.
+
+    Half Kelly formula: f* = (win_rate × avg_win − loss_rate × avg_loss) / avg_win / 2
+
+    Falls back to settings.max_position_pct when insufficient history.
+
+    Args:
+        trades: List of trade dicts from get_recent_trades(). Must have 'pnl_pct' key.
+
+    Returns:
+        Position size as fraction of portfolio (0.01–0.50).
+
+    Example:
+        >>> pos_pct = compute_kelly_position_pct(get_recent_trades(100))
+        >>> position_usd = portfolio_value * pos_pct
+    """
+    closed = [t for t in trades if t.get("pnl_pct") is not None and t.get("status") == "closed"]
+
+    if len(closed) < settings.kelly_min_trades:
+        logger.debug(
+            f"Kelly: only {len(closed)} closed trades (need {settings.kelly_min_trades}), "
+            f"using default {settings.max_position_pct:.1%}"
+        )
+        return settings.max_position_pct
+
+    wins   = [t["pnl_pct"] for t in closed if t["pnl_pct"] > 0]
+    losses = [abs(t["pnl_pct"]) for t in closed if t["pnl_pct"] < 0]
+
+    if not wins or not losses:
+        return settings.max_position_pct
+
+    win_rate  = len(wins) / len(closed)
+    loss_rate = 1.0 - win_rate
+    avg_win   = sum(wins)   / len(wins)   / 100.0  # convert % to fraction
+    avg_loss  = sum(losses) / len(losses) / 100.0
+
+    if avg_win <= 0:
+        return settings.max_position_pct
+
+    # Full Kelly = (W×b - L) / b  where b = avg_win / avg_loss
+    # Simplified: (win_rate × avg_win − loss_rate × avg_loss) / avg_win
+    full_kelly = (win_rate * avg_win - loss_rate * avg_loss) / avg_win
+    half_kelly = full_kelly / 2.0
+
+    # Clamp between 1% and settings.max_position_pct
+    result = max(0.01, min(settings.max_position_pct, half_kelly))
+
+    logger.info(
+        f"Kelly sizing: win_rate={win_rate:.1%} avg_win={avg_win:.3%} avg_loss={avg_loss:.3%} "
+        f"full_kelly={full_kelly:.3f} half_kelly={half_kelly:.3f} → clamped={result:.3f}"
+    )
+    return round(result, 4)
+
+
+# ── Gradual circuit breaker recovery ──────────────────────────────────────────
+
+def get_recovery_size_multiplier() -> float:
+    """
+    Return position size multiplier based on circuit breaker recovery day.
+
+    Day 0 (not in recovery): 1.0×
+    Day 1 after CB:          0.25×
+    Day 2:                   0.50×
+    Day 3:                   0.75×
+    Day 4+:                  1.00×
+
+    Returns:
+        Multiplier to apply to computed position size.
+
+    Example:
+        >>> mult = get_recovery_size_multiplier()
+        >>> position_usd = kelly_position_usd * mult
+    """
+    from backend.memory.store import get_state
+
+    try:
+        recovery_day_str = get_state("cb_recovery_day")
+        if recovery_day_str is None:
+            return 1.0  # Not in recovery
+
+        recovery_day = int(recovery_day_str)
+        if recovery_day <= 0:
+            return 1.0
+        if recovery_day == 1:
+            mult = 0.25
+        elif recovery_day == 2:
+            mult = 0.50
+        elif recovery_day == 3:
+            mult = 0.75
+        else:
+            mult = 1.00
+
+        if recovery_day >= 4:
+            # Fully recovered — clear recovery state
+            from backend.memory.store import set_state
+            set_state("cb_recovery_day", "0")
+
+        logger.info(f"CB recovery day {recovery_day}: position size multiplier = {mult:.2f}×")
+        return mult
+
+    except Exception as exc:
+        logger.warning(f"Error reading CB recovery day: {exc}")
+        return 1.0
+
+
 class TradeApproval(BaseModel):
     """
     Result of the Tier 1 per-trade risk assessment.
@@ -108,10 +217,21 @@ def approve_trade(
         logger.warning(f"Tier 1 REJECTED: {reason}")
         return TradeApproval(approved=False, reason=reason)
 
-    # ── Check 2: Position sizing ───────────────────────────────────────────────
-    # Maximum position = MAX_POSITION_PCT × portfolio_value
-    max_position_usd = settings.max_position_pct * portfolio_value
-    position_size_usd = max_position_usd  # Use full allowed position
+    # ── Check 2: Position sizing (Kelly criterion + recovery multiplier) ─────
+    if settings.use_kelly_sizing:
+        try:
+            from backend.memory.store import get_recent_trades
+            recent = get_recent_trades(100)
+            kelly_pct = compute_kelly_position_pct(recent)
+        except Exception:
+            kelly_pct = settings.max_position_pct
+    else:
+        kelly_pct = settings.max_position_pct
+
+    recovery_mult = get_recovery_size_multiplier()
+    effective_pct = kelly_pct * recovery_mult
+    max_position_usd = effective_pct * portfolio_value
+    position_size_usd = max_position_usd
 
     if position_size_usd <= 0:
         reason = f"Position size ${position_size_usd:.2f} is zero or negative (portfolio_value=${portfolio_value:.2f})"
@@ -251,7 +371,6 @@ def check_circuit_breaker(daily_pnl_pct: float) -> bool:
     from backend.memory.store import get_state, set_state
 
     if daily_pnl_pct <= -settings.daily_loss_limit_pct:
-        # Set recovery time to start of next calendar day UTC
         now = datetime.now(UTC)
         recovery_time = (now + timedelta(days=1)).replace(
             hour=0, minute=0, second=0, microsecond=0
@@ -259,11 +378,13 @@ def check_circuit_breaker(daily_pnl_pct: float) -> bool:
 
         set_state("circuit_breaker_active", "true")
         set_state("circuit_breaker_recovery_time", recovery_time.isoformat())
+        set_state("cb_recovery_day", "1")   # Start gradual recovery at Day 1
 
         logger.critical(
             f"CIRCUIT BREAKER ACTIVATED! Daily PnL={daily_pnl_pct:.2%} ≤ "
             f"limit={-settings.daily_loss_limit_pct:.2%}. "
-            f"All trading halted until {recovery_time.isoformat()}"
+            f"Trading halted until {recovery_time.isoformat()}. "
+            f"Gradual recovery: 25%→50%→75%→100% over 4 days."
         )
         return True
 
@@ -303,11 +424,26 @@ def is_circuit_breaker_active() -> bool:
         now = datetime.now(UTC)
 
         if now >= recovery_time:
-            # Recovery time has passed — auto-reset
-            logger.info(
-                f"Circuit breaker auto-reset: recovery time {recovery_str} has passed."
+            # Recovery period has passed — advance recovery day counter
+            recovery_day_str = get_state("cb_recovery_day") or "0"
+            recovery_day = int(recovery_day_str) + 1
+            set_state("cb_recovery_day", str(recovery_day))
+            set_state("circuit_breaker_active", "false")  # Allow trading but at reduced size
+            # Set next day's recovery time
+            next_day = (now + timedelta(days=1)).replace(
+                hour=0, minute=0, second=0, microsecond=0
             )
-            reset_circuit_breaker()
+            set_state("circuit_breaker_recovery_time", next_day.isoformat())
+
+            if recovery_day >= 4:
+                logger.info("Circuit breaker full recovery complete — position sizing back to 100%.")
+                reset_circuit_breaker()
+            else:
+                mult = {1: 0.25, 2: 0.50, 3: 0.75}.get(recovery_day, 1.0)
+                logger.info(
+                    f"Circuit breaker recovery day {recovery_day}: "
+                    f"trading resumed at {mult:.0%} position size."
+                )
             return False
 
         remaining = (recovery_time - now).total_seconds() / 3600

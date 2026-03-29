@@ -159,6 +159,21 @@ def init_db() -> None:
             )
         """)
 
+        # ── execution_quality table ────────────────────────────────────────────
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS execution_quality (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id     TEXT UNIQUE NOT NULL,
+                timestamp    TEXT NOT NULL,
+                pair         TEXT NOT NULL,
+                action       TEXT NOT NULL,
+                signal_price REAL NOT NULL DEFAULT 0.0,
+                entry_price  REAL NOT NULL DEFAULT 0.0,
+                slippage_pct REAL NOT NULL DEFAULT 0.0,
+                order_type   TEXT NOT NULL DEFAULT 'market'
+            )
+        """)
+
         # ── Indexes for query performance ──────────────────────────────────────
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_decisions_timestamp ON decisions(timestamp DESC)"
@@ -171,6 +186,10 @@ def init_db() -> None:
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_snapshots_timestamp ON portfolio_snapshots(timestamp DESC)"
+        )
+
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_exec_quality_timestamp ON execution_quality(timestamp DESC)"
         )
 
         conn.commit()
@@ -488,6 +507,51 @@ def set_state(key: str, value: str) -> None:
         conn.commit()
     except sqlite3.Error as exc:
         logger.error(f"Failed to set state '{key}': {exc}")
+    finally:
+        conn.close()
+
+
+def save_execution_quality(q: dict[str, Any]) -> None:
+    """
+    Save an execution quality record to the execution_quality table.
+
+    Called after every successful order to track signal price vs actual
+    entry price for slippage analysis and execution quality reporting.
+
+    Args:
+        q: Dictionary with keys: order_id, timestamp, pair, action,
+           signal_price, entry_price, slippage_pct, order_type.
+
+    Example:
+        >>> save_execution_quality({
+        ...     'order_id': 'XYZ123', 'pair': 'BTCUSD', 'action': 'buy',
+        ...     'signal_price': 67000.0, 'entry_price': 66800.0,
+        ...     'slippage_pct': -0.299, 'order_type': 'limit'
+        ... })
+    """
+    conn = _get_connection()
+    try:
+        conn.execute("""
+            INSERT OR REPLACE INTO execution_quality (
+                order_id, timestamp, pair, action,
+                signal_price, entry_price, slippage_pct, order_type
+            ) VALUES (
+                :order_id, :timestamp, :pair, :action,
+                :signal_price, :entry_price, :slippage_pct, :order_type
+            )
+        """, {
+            "order_id":     q["order_id"],
+            "timestamp":    q.get("timestamp", datetime.now(UTC).isoformat()),
+            "pair":         q.get("pair", settings.trading_pair),
+            "action":       q["action"],
+            "signal_price": q.get("signal_price", 0.0),
+            "entry_price":  q.get("entry_price", 0.0),
+            "slippage_pct": q.get("slippage_pct", 0.0),
+            "order_type":   q.get("order_type", "market"),
+        })
+        conn.commit()
+    except sqlite3.Error as exc:
+        logger.error(f"Failed to save execution quality for {q.get('order_id')}: {exc}")
     finally:
         conn.close()
 

@@ -147,17 +147,26 @@ class IndicatorSnapshot(BaseModel):
         bb_lower: Bollinger Band lower boundary.
         bb_pct_b: Bollinger %B — position within the band (0=lower, 1=upper, >1=above upper).
         vwap: Volume-weighted average price for the current session.
+        vwap_upper_1sd: VWAP + 1 standard deviation.
+        vwap_lower_1sd: VWAP − 1 standard deviation.
+        vwap_upper_2sd: VWAP + 2 standard deviations.
+        vwap_lower_2sd: VWAP − 2 standard deviations.
         atr: Average True Range — dollar volatility per candle.
         ema_fast: Fast EMA (period 9) value.
         ema_slow: Slow EMA (period 21) value.
         ema_cross: 'bullish' if fast crossed above slow, 'bearish' if below, 'none'.
         adx: Average Directional Index — trend strength 0–100.
+        delta: Estimated net buying pressure (positive = buy-dominated candle).
+        delta_divergence: Divergence score — positive price move not confirmed by delta = negative value.
+        z_rsi: Z-score of RSI relative to its 50-candle rolling distribution.
+        z_volume: Z-score of current volume vs 50-candle rolling mean.
+        z_atr: Z-score of ATR — high value signals abnormal volatility.
         current_price: Most recent close price.
         timestamp: ISO 8601 timestamp of the most recent candle.
 
     Example:
         >>> snap = compute_indicators(df)
-        >>> print(snap.rsi, snap.macd_cross_direction)
+        >>> print(snap.rsi, snap.z_rsi, snap.delta_divergence)
     """
 
     model_config = ConfigDict(frozen=True)
@@ -174,6 +183,10 @@ class IndicatorSnapshot(BaseModel):
     bb_lower: float = Field(description="Bollinger Band lower boundary.")
     bb_pct_b: float = Field(description="Bollinger %B position within band.")
     vwap: float = Field(description="Volume-weighted average price.")
+    vwap_upper_1sd: float = Field(default=0.0, description="VWAP + 1σ band.")
+    vwap_lower_1sd: float = Field(default=0.0, description="VWAP − 1σ band.")
+    vwap_upper_2sd: float = Field(default=0.0, description="VWAP + 2σ band.")
+    vwap_lower_2sd: float = Field(default=0.0, description="VWAP − 2σ band.")
     atr: float = Field(description="Average True Range (volatility metric).")
     ema_fast: float = Field(description=f"EMA {settings.EMA_FAST} value.")
     ema_slow: float = Field(description=f"EMA {settings.EMA_SLOW} value.")
@@ -181,6 +194,17 @@ class IndicatorSnapshot(BaseModel):
         description="EMA crossover direction from previous candle."
     )
     adx: float = Field(description="ADX trend strength 0-100.")
+    delta: float = Field(default=0.0, description="Estimated net buying pressure for the last candle.")
+    delta_divergence: float = Field(
+        default=0.0,
+        description=(
+            "Delta divergence score. Negative = price rising but delta falling (hidden weakness). "
+            "Positive = price falling but delta rising (hidden strength)."
+        ),
+    )
+    z_rsi: float = Field(default=0.0, description="Z-score of RSI vs 50-candle rolling distribution.")
+    z_volume: float = Field(default=0.0, description="Z-score of current volume vs 50-candle rolling mean.")
+    z_atr: float = Field(default=0.0, description="Z-score of ATR — high = abnormal volatility.")
     current_price: float = Field(description="Most recent close price.")
     timestamp: str = Field(description="ISO 8601 UTC timestamp of last candle.")
 
@@ -314,13 +338,28 @@ def compute_indicators(df: pd.DataFrame) -> IndicatorSnapshot:
 
     logger.debug(f"BB: lower={bb_lower}, middle={bb_middle}, upper={bb_upper}, %B={bb_pct_b}")
 
-    # ── VWAP ─────────────────────────────────────────────────────────────────
+    # ── VWAP + Standard Deviation Bands ──────────────────────────────────────
     typical_price = (df["high"] + df["low"] + df["close"]) / 3.0
     cumulative_pv = (typical_price * df["volume"]).cumsum()
     cumulative_vol = df["volume"].cumsum()
     vwap_series = cumulative_pv / cumulative_vol
     vwap_val = _round4(_safe_last(vwap_series))
-    logger.debug(f"VWAP: {vwap_val}")
+
+    # VWAP SD bands: deviation of typical price from running VWAP
+    vwap_dev_sq = ((typical_price - vwap_series) ** 2 * df["volume"]).cumsum()
+    vwap_variance = vwap_dev_sq / cumulative_vol.replace(0, np.nan)
+    vwap_std = vwap_variance.apply(lambda x: np.sqrt(x) if x >= 0 else 0.0)
+    vwap_std_val = _round4(_safe_last(vwap_std))
+
+    vwap_upper_1sd = _round4(vwap_val + vwap_std_val)
+    vwap_lower_1sd = _round4(vwap_val - vwap_std_val)
+    vwap_upper_2sd = _round4(vwap_val + 2 * vwap_std_val)
+    vwap_lower_2sd = _round4(vwap_val - 2 * vwap_std_val)
+
+    logger.debug(
+        f"VWAP: {vwap_val} ±1σ=[{vwap_lower_1sd}, {vwap_upper_1sd}] "
+        f"±2σ=[{vwap_lower_2sd}, {vwap_upper_2sd}]"
+    )
 
     # ── ATR ───────────────────────────────────────────────────────────────────
     if _TA_AVAILABLE:
@@ -364,6 +403,53 @@ def compute_indicators(df: pd.DataFrame) -> IndicatorSnapshot:
     adx_val = _round4(_safe_last(adx_series))
     logger.debug(f"ADX: {adx_val}")
 
+    # ── Delta (estimated buying/selling pressure per candle) ─────────────────
+    # Delta proxy: fraction of candle range covered by close-open, weighted by volume
+    # Positive = close above open (buyers won the candle)
+    # Negative = close below open (sellers won the candle)
+    candle_range = (df["high"] - df["low"]).replace(0, np.nan)
+    raw_delta = ((df["close"] - df["open"]) / candle_range) * df["volume"]
+    delta_val = _round4(_safe_last(raw_delta))
+
+    # Cumulative delta for divergence detection (rolling 20 candles)
+    cum_delta_20 = raw_delta.tail(20).cumsum()
+    cum_price_20 = df["close"].tail(20)
+
+    delta_divergence_val = 0.0
+    if len(cum_delta_20) >= 4 and len(cum_price_20) >= 4:
+        price_change_pct = (
+            (float(cum_price_20.iloc[-1]) - float(cum_price_20.iloc[0]))
+            / float(cum_price_20.iloc[0])
+            if float(cum_price_20.iloc[0]) > 0 else 0.0
+        )
+        delta_change = float(cum_delta_20.iloc[-1]) - float(cum_delta_20.iloc[0])
+        delta_norm = delta_change / (abs(float(cum_delta_20.iloc[0])) + 1e-8)
+        # Divergence = price direction vs delta direction mismatch
+        # Negative score = price up but delta flat/down (weakness)
+        # Positive score = price down but delta flat/up (hidden strength)
+        delta_divergence_val = _round4(delta_norm - price_change_pct * 10)
+
+    logger.debug(f"Delta: {delta_val:.4f}, delta_divergence: {delta_divergence_val:.4f}")
+
+    # ── Z-scores (RSI, volume, ATR relative to 50-candle rolling distribution) ─
+    _ZSCORE_WINDOW = 50
+
+    def _zscore(series: pd.Series) -> float:
+        tail = series.dropna().tail(_ZSCORE_WINDOW)
+        if len(tail) < 10:
+            return 0.0
+        mean = float(tail.mean())
+        std  = float(tail.std(ddof=1))
+        if std < 1e-8:
+            return 0.0
+        return _round4((float(tail.iloc[-1]) - mean) / std)
+
+    z_rsi_val    = _zscore(rsi_series)
+    z_volume_val = _zscore(df["volume"])
+    z_atr_val    = _zscore(atr_series)
+
+    logger.debug(f"Z-scores: RSI={z_rsi_val:.2f} Vol={z_volume_val:.2f} ATR={z_atr_val:.2f}")
+
     # ── Current price and timestamp ───────────────────────────────────────────
     current_price = _round4(float(df["close"].iloc[-1]))
     timestamp_raw = df["timestamp"].iloc[-1] if "timestamp" in df.columns else pd.Timestamp.utcnow()
@@ -383,11 +469,20 @@ def compute_indicators(df: pd.DataFrame) -> IndicatorSnapshot:
         bb_lower=bb_lower,
         bb_pct_b=bb_pct_b,
         vwap=vwap_val,
+        vwap_upper_1sd=vwap_upper_1sd,
+        vwap_lower_1sd=vwap_lower_1sd,
+        vwap_upper_2sd=vwap_upper_2sd,
+        vwap_lower_2sd=vwap_lower_2sd,
         atr=atr_val,
         ema_fast=ema_fast_val,
         ema_slow=ema_slow_val,
         ema_cross=ema_cross,
         adx=adx_val,
+        delta=delta_val,
+        delta_divergence=delta_divergence_val,
+        z_rsi=z_rsi_val,
+        z_volume=z_volume_val,
+        z_atr=z_atr_val,
         current_price=current_price,
         timestamp=ts_str,
     )

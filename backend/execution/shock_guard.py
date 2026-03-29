@@ -1,30 +1,40 @@
 """
-Shock guard — real-time emergency exit on rapid price drops.
+Shock guard — real-time emergency exit on rapid price drops + OFI tracking.
 
-This module implements a WebSocket-based price monitor that runs as a
-background asyncio task and watches for sudden large price drops that
-require immediate position closure before the standard 15-minute cycle
-can react.
+This module implements a WebSocket-based monitor that runs as a background
+asyncio task and serves two purposes:
 
-Trigger condition: (window_high - current_price) / window_high > 3%
-within a rolling 5-minute window.
+1. SHOCK DETECTION (original)
+   Watches for sudden large price drops that require immediate position
+   closure before the standard cycle can react.
+   Trigger: (window_high - current_price) / window_high > 3% in 5 minutes.
 
-Why 3% in 5 minutes? This threshold targets flash crashes and panic cascades
-rather than normal volatility. Bitcoin's typical 5-minute range is 0.2–0.8%.
-A 3% drop in 5 minutes indicates an extraordinary event (exchange hack news,
-regulatory action, major whale dump) that warrants emergency exit regardless
-of the agent's trading strategy.
+2. ORDER FLOW IMBALANCE (OFI) accumulation
+   Subscribes to the level-2 book channel alongside the ticker channel.
+   On each book update, records the signed delta:
+     delta = best_bid_qty - best_ask_qty
+   Accumulates a rolling sum of signed deltas over the last N ticks to
+   form an OFI score the confluence engine can query.
+
+   OFI interpretation:
+     positive OFI → buyers are more aggressive → bullish pressure
+     negative OFI → sellers are more aggressive → bearish pressure
+     near-zero OFI → balanced order flow → neutral
+
+   Why OFI? Unlike price, OFI detects *intent* before price moves.
+   A large positive OFI while price is flat often precedes an upward
+   breakout, and vice-versa.
 
 Architecture:
-- Subscribes to Kraken WebSocket v2 ticker channel
-- Maintains a deque of recent prices with timestamps
-- Checks the 5-minute window on every tick
+- Subscribes to Kraken WebSocket v2 ticker + book channels
+- Maintains a deque of recent prices (shock detection)
+- Maintains a deque of signed bid/ask deltas (OFI accumulation)
+- Exposes `ofi_score` property: rolling sum of last N deltas, normalised
 - Emergency exit: close_all_positions() + activate circuit breaker
 - Auto-reconnects with exponential backoff (1s → 2s → 4s → 8s → max 60s)
 
 Role in system: Runs as a concurrent asyncio task started in main.py.
-It is the only component that reads raw WebSocket prices — all other
-price data comes from the Kraken CLI OHLCV/ticker endpoints.
+Confluence engine calls `shock_guard.ofi_score` during each decision cycle.
 
 Dependencies: websockets, asyncio, collections.deque, loguru
 """
@@ -54,6 +64,10 @@ _WINDOW_SECONDS = 300
 # Maximum deque size: assume 1 tick per second → 300 ticks = 5 minutes
 _MAX_DEQUE_SIZE = 300
 
+# OFI rolling window: accumulate over last N book updates
+# At ~1 book update per second, 200 ticks ≈ 3 minutes of flow data
+_OFI_WINDOW = 200
+
 # Reconnect backoff configuration
 _INITIAL_BACKOFF = 1.0  # seconds
 _MAX_BACKOFF = 60.0     # seconds
@@ -62,28 +76,31 @@ _BACKOFF_MULTIPLIER = 2.0
 
 class ShockGuard:
     """
-    Real-time WebSocket price monitor with emergency exit capability.
+    Real-time WebSocket price monitor with emergency exit + OFI accumulation.
 
-    Maintains a rolling window of recent prices and triggers emergency
-    position closure if the price drops more than 3% from the window high
-    within any 5-minute period.
+    Maintains a rolling window of recent prices (shock detection) and a
+    rolling deque of signed bid/ask deltas (OFI = Order Flow Imbalance).
 
     Attributes:
         is_running: True while the WebSocket connection is active.
         last_price: Most recently received price tick.
         last_update: ISO 8601 timestamp of last price update.
         emergency_triggered: True if the emergency exit has fired this session.
+        ofi_score: Rolling sum of signed bid/ask deltas, normalised to [-1, 1].
+                   Positive → buy pressure, negative → sell pressure.
 
     Example:
         >>> guard = ShockGuard()
         >>> asyncio.create_task(guard.run())
-        >>> print(guard.last_price)
+        >>> print(guard.ofi_score)   # -1.0 to +1.0
     """
 
     def __init__(self) -> None:
-        """Initialise the shock guard with an empty price window."""
+        """Initialise the shock guard with an empty price window and OFI deque."""
         # Deque of (unix_timestamp: float, price: float) tuples
         self._price_window: deque[tuple[float, float]] = deque(maxlen=_MAX_DEQUE_SIZE)
+        # Deque of signed bid/ask deltas for OFI: positive = buy pressure
+        self._ofi_deltas: deque[float] = deque(maxlen=_OFI_WINDOW)
         self._is_running: bool = False
         self._last_price: float = 0.0
         self._last_update: str = ""
@@ -109,6 +126,71 @@ class ShockGuard:
     def emergency_triggered(self) -> bool:
         """True if an emergency exit has been triggered this session."""
         return self._emergency_triggered
+
+    @property
+    def ofi_score(self) -> float:
+        """
+        Current Order Flow Imbalance score, normalised to [-1.0, 1.0].
+
+        Computed as the mean of the last _OFI_WINDOW signed bid/ask deltas,
+        where each delta = best_bid_qty - best_ask_qty at each book update.
+
+        Returns:
+            Float in [-1.0, 1.0].
+            +1.0 → sustained aggressive buying pressure
+            -1.0 → sustained aggressive selling pressure
+             0.0 → balanced or no data yet
+
+        Example:
+            >>> score = guard.ofi_score
+            >>> if score > 0.3:
+            ...     print("Strong buy flow")
+        """
+        if not self._ofi_deltas:
+            return 0.0
+        raw = sum(self._ofi_deltas) / len(self._ofi_deltas)
+        # Normalise: cap at ±100 BTC equivalent, map to [-1, 1]
+        return max(-1.0, min(1.0, raw / 100.0))
+
+    def _accumulate_ofi(self, data: dict[str, Any]) -> None:
+        """
+        Extract best bid/ask from a book snapshot/update and accumulate OFI.
+
+        Kraken WebSocket v2 book message format (snapshot):
+            {"channel": "book", "type": "snapshot", "data": [
+                {"symbol": "BTC/USD",
+                 "bids": [{"price": 67000, "qty": 0.5}, ...],
+                 "asks": [{"price": 67010, "qty": 0.3}, ...]}
+            ]}
+
+        OFI delta = best_bid_qty - best_ask_qty
+        Appended to the _ofi_deltas deque each time a book message arrives.
+
+        Args:
+            data: Parsed WebSocket message dict.
+        """
+        try:
+            if data.get("channel") != "book":
+                return
+            book_data = data.get("data", [])
+            if not book_data or not isinstance(book_data, list):
+                return
+            book = book_data[0]
+            bids = book.get("bids", [])
+            asks = book.get("asks", [])
+            if not bids or not asks:
+                return
+
+            # Best bid = highest bid price (first in Kraken's sorted list)
+            best_bid_qty = float(bids[0].get("qty", 0.0))
+            # Best ask = lowest ask price (first in Kraken's sorted list)
+            best_ask_qty = float(asks[0].get("qty", 0.0))
+
+            delta = best_bid_qty - best_ask_qty
+            self._ofi_deltas.append(delta)
+
+        except (KeyError, IndexError, TypeError, ValueError):
+            pass
 
     def _add_price_tick(self, price: float) -> None:
         """
@@ -245,27 +327,35 @@ class ShockGuard:
 
         return None
 
-    async def _subscribe_ticker(self, ws: Any) -> None:
+    async def _subscribe_channels(self, ws: Any) -> None:
         """
-        Send ticker subscription message to Kraken WebSocket.
+        Subscribe to ticker (price) and book (OFI) channels on Kraken WebSocket v2.
+
+        Sends two subscription messages:
+          - ticker: for shock detection (price)
+          - book:   for OFI accumulation (bid/ask quantities, depth=1)
 
         Args:
             ws: Active WebSocket connection object.
 
         Example:
-            >>> await guard._subscribe_ticker(ws)
+            >>> await guard._subscribe_channels(ws)
         """
-        # Kraken v2 WebSocket subscription format
         pair_ws = settings.trading_pair.replace("USD", "/USD")  # e.g. BTCUSD → BTC/USD
-        subscribe_msg = {
+
+        # Ticker subscription (shock detection)
+        await ws.send(json.dumps({
             "method": "subscribe",
-            "params": {
-                "channel": "ticker",
-                "symbol": [pair_ws],
-            },
-        }
-        await ws.send(json.dumps(subscribe_msg))
-        logger.info(f"Shock guard subscribed to ticker: {pair_ws}")
+            "params": {"channel": "ticker", "symbol": [pair_ws]},
+        }))
+
+        # Book subscription (OFI accumulation) — depth=1 gives best bid/ask only
+        await ws.send(json.dumps({
+            "method": "subscribe",
+            "params": {"channel": "book", "symbol": [pair_ws], "depth": 1},
+        }))
+
+        logger.info(f"Shock guard subscribed to ticker + book (OFI): {pair_ws}")
 
     async def run(self) -> None:
         """
@@ -294,7 +384,7 @@ class ShockGuard:
                     backoff = _INITIAL_BACKOFF  # Reset on successful connection
                     logger.info("Shock guard WebSocket connected")
 
-                    await self._subscribe_ticker(ws)
+                    await self._subscribe_channels(ws)
 
                     async for raw_msg in ws:
                         try:
@@ -302,15 +392,21 @@ class ShockGuard:
                         except json.JSONDecodeError:
                             continue
 
-                        price = self._parse_price_from_ticker(data)
-                        if price is None or price <= 0:
+                        channel = data.get("channel", "")
+
+                        # OFI: accumulate bid/ask deltas from book updates
+                        if channel == "book":
+                            self._accumulate_ofi(data)
                             continue
 
-                        self._add_price_tick(price)
-
-                        # Check for shock condition on every tick
-                        if self._check_shock_condition(price):
-                            await self._trigger_emergency_exit()
+                        # Shock detection: monitor price via ticker
+                        if channel == "ticker":
+                            price = self._parse_price_from_ticker(data)
+                            if price is None or price <= 0:
+                                continue
+                            self._add_price_tick(price)
+                            if self._check_shock_condition(price):
+                                await self._trigger_emergency_exit()
 
             except asyncio.CancelledError:
                 logger.info("Shock guard task cancelled — shutting down")

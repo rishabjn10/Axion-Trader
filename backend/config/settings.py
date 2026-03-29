@@ -115,10 +115,44 @@ class Settings(BaseSettings):
         description="Maximum number of simultaneously open positions across all pairs.",
     )
     confluence_min_score: int = Field(
-        default=3,
+        default=4,
         ge=1,
         le=8,
-        description="Minimum confluence score (out of 8) required to proceed past the confluence gate to the AI cycle.",
+        description="Minimum confluence score (out of 8) in normal conditions.",
+    )
+    confluence_volatile_score: int = Field(
+        default=6,
+        ge=1,
+        le=8,
+        description="Minimum confluence score when narrative flags high tail risk or volatile regime.",
+    )
+
+    # ── Execution ─────────────────────────────────────────────────────────────
+    use_limit_orders: bool = Field(
+        default=True,
+        description="Place limit orders at mid-price first; fall back to market after limit_order_timeout_s.",
+    )
+    limit_order_timeout_s: int = Field(
+        default=30,
+        ge=5,
+        le=300,
+        description="Seconds to wait for a limit order fill before cancelling and using market.",
+    )
+    micro_pullback_pct: float = Field(
+        default=0.003,
+        ge=0.0,
+        le=0.02,
+        description="For limit orders, offset entry price by this fraction (0.3% below for buys, above for sells).",
+    )
+    use_kelly_sizing: bool = Field(
+        default=True,
+        description="Use Half Kelly criterion for position sizing when sufficient trade history exists.",
+    )
+    kelly_min_trades: int = Field(
+        default=20,
+        ge=5,
+        le=200,
+        description="Minimum closed trades required before switching from fixed to Kelly sizing.",
     )
 
     # ── Cycle intervals (override for testing) ────────────────────────────────

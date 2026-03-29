@@ -1,6 +1,6 @@
 # axion-trader
 
-Autonomous AI trading agent for Kraken exchange — Gemini Flash LLM + deterministic rules + three-tier risk management.
+Autonomous AI trading agent for Kraken exchange — Gemini Flash LLM + deterministic rule engine + multi-timeframe confluence + three-tier risk management.
 
 > **⚠️ Trading Risk Disclaimer**
 > This software is for educational and research purposes. Cryptocurrency trading carries significant financial risk — you can lose your entire investment. Past simulated (paper) performance is not indicative of future real results. This is not financial advice. Never trade with money you cannot afford to lose. The authors accept no liability for financial losses incurred through use of this software.
@@ -10,50 +10,56 @@ Autonomous AI trading agent for Kraken exchange — Gemini Flash LLM + determini
                        │                  axion-trader                   │
                        └─────────────────────────────────────────────────┘
 
- ┌──────────────┐   ┌──────────────┐   ┌────────────────────┐   ┌─────────────┐
- │  Kraken CLI  │──▶│  Indicators  │──▶│     AI Brain       │──▶│    Risk     │
- │  OHLCV 15m   │   │  8 signals   │   │  Gemini Flash LLM  │   │  3-tier     │
- │  OHLCV  1h   │   │  confluence  │   │  + Rule Engine     │   │  guard      │
- │  OHLCV  4h   │   │  regime      │   │  + Reflection      │   │             │
- └──────────────┘   └──────────────┘   └────────────────────┘   └─────────────┘
-        │                                                               │
- ┌──────────────┐                                             ┌─────────────────┐
- │  Sentiment   │                                             │   Execution     │
- │  F&G + news  │                                             │  paper / live   │
- └──────────────┘                                             └────────┬────────┘
-                                                                       │
- ┌─────────────────────────────────────────────────────────────────────▼────────┐
- │                          SQLite  (trading.db)                                │
- │   decisions · trades · portfolio_snapshots · agent_state                    │
- └─────────────────────────────────────────────────────────────────────┬────────┘
-                                                                       │
- ┌─────────────────────────────────────────────────────────────────────▼────────┐
- │                        FastAPI REST API  (:8000)                             │
- │   /api/state · /api/trades · /api/metrics · /api/decisions · /api/price     │
- └─────────────────────────────────────────────────────────────────────┬────────┘
-                                                                       │
- ┌─────────────────────────────────────────────────────────────────────▼────────┐
- │                       React Dashboard  (:3000)                               │
- │    Agent Status · PnL Cards · Trade Log · Price Chart · Confluence Panel     │
- └──────────────────────────────────────────────────────────────────────────────┘
+ ┌──────────────┐   ┌──────────────────┐   ┌────────────────────┐   ┌─────────────┐
+ │  Kraken CLI  │──▶│   Indicators     │──▶│     AI Brain       │──▶│    Risk     │
+ │  OHLCV  5m   │   │  10 signals      │   │  Gemini Flash LLM  │   │  3-tier     │
+ │  OHLCV  1h   │   │  confluence      │   │  + Rule Engine     │   │  guard      │
+ │  WebSocket   │   │  regime (5-state)│   │  + Narrative Ctx   │   │             │
+ └──────────────┘   └──────────────────┘   └────────────────────┘   └─────────────┘
+        │                                                                    │
+ ┌──────────────┐   ┌──────────────┐   ┌──────────────────┐                │
+ │  Sentiment   │   │ Microstructure│   │  Volume Profile  │                │
+ │  F&G + news  │   │  OFI + spread │   │  POC / VAH / VAL │                │
+ └──────────────┘   └──────────────┘   └──────────────────┘                │
+                                                                            │
+ ┌──────────────────────────────────────────────────────────────────────────▼──────┐
+ │                          SQLite  (trading.db)                                   │
+ │   decisions · trades · portfolio_snapshots · agent_state · execution_quality   │
+ └──────────────────────────────────────────────────────────────────────┬──────────┘
+                                                                        │
+ ┌──────────────────────────────────────────────────────────────────────▼──────────┐
+ │                        FastAPI REST API  (:8000)                                │
+ │   /api/state · /api/trades · /api/metrics · /api/decisions · /api/price        │
+ └──────────────────────────────────────────────────────────────────────┬──────────┘
+                                                                        │
+ ┌──────────────────────────────────────────────────────────────────────▼──────────┐
+ │                       React Dashboard  (:3000)                                  │
+ │    Agent Status · PnL Cards · Trade Log · Price Chart · Confluence Panel        │
+ └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Features
 
-- **Multi-timeframe analysis** — 15m, 1h, and 4h OHLCV from Kraken
-- **8 confluence signals** — RSI, MACD cross, Bollinger Bands %B, VWAP, EMA cross, ATR, ADX, market regime; each votes bull/bear; score gates the AI cycle
-- **Hybrid AI brain** — Gemini Flash LLM (strategic context) + deterministic rule engine (tactical triggers); both must reach consensus to execute
+- **Multi-timeframe analysis** — 5m (signals) + 1h (regime context) OHLCV from Kraken/yfinance
+- **10 confluence signals** — RSI, MACD cross, Bollinger Bands %B, VWAP, EMA cross, ATR, ADX, market regime, microstructure, volume profile; each votes bull/bear; weighted score gates the AI cycle
+- **5-state market regime** — `TRENDING_UP_STRONG`, `TRENDING_UP_WEAK`, `RANGING`, `TRENDING_DOWN`, `VOLATILE`; VOLATILE triggers stand-aside early exit
+- **8-rule deterministic engine** — Rules 1–4 (event-based: RSI extreme + BB + MACD cross, EMA cross with regime confirmation) and Rules 5–8 (state-based: EMA momentum, RSI bounce/fade in ranging markets)
+- **Hybrid AI brain** — Gemini Flash LLM (strategic context) + deterministic rule engine (tactical triggers); consensus required to execute
+- **Narrative context** — LLM-generated market narrative adjusts confidence modifier and raises confluence threshold when tail risk is detected
+- **Order Flow Imbalance (OFI)** — rolling bid/ask quantity delta from Kraken Level 2 WebSocket, normalised to [-1, +1], used as market microstructure signal
+- **Volume profile** — intrabar Point of Control (POC), Value Area High/Low computed on 1h data; used as support/resistance context in confluence
 - **LLM memory / reflection** — recent trade history injected into every Gemini prompt so the AI reasons about what it has already done
-- **Three-tier risk management** — per-trade sizing, portfolio exposure cap, circuit breaker
-- **ATR-based stop-loss with floor** — `max(ATR×1.5, STOP_LOSS_PCT × entry)` so the configured percentage acts as a minimum guarantee
+- **Three-tier risk management** — per-trade sizing (Kelly or fixed %), portfolio exposure cap, circuit breaker
+- **ATR-based stop-loss with floor** — `max(ATR × 1.5, STOP_LOSS_PCT × entry)` so the configured percentage acts as a minimum guarantee
 - **2:1 R:R enforcement** — take-profit is always 2× the actual stop distance
-- **Stop/TP monitoring** — checked every fast loop tick; auto-closes positions when triggered
+- **Execution quality tracking** — signal price vs actual fill price + slippage % recorded per order in `execution_quality` table
 - **Flash crash protection** — WebSocket shock guard: 3% drop in 5 min triggers emergency close of all positions
 - **Full DB audit trail** — every cycle type writes a record: fast loop evaluations, circuit breaker skips, regime changes, portfolio snapshots on every standard cycle
 - **Confluence signal breakdown** — per-signal bull/bear/neutral stored in DB, returned by API, displayed visually on dashboard, injected into Gemini prompt
 - **Paper / Live modes** — full simulation via `kraken paper` commands; zero code changes required to switch
 - **React dashboard** — real-time status, PnL metrics, trade log with stop/target/closed-at, indicator panel with signal breakdown
 - **Docker support** — `docker compose up -d` for 24/7 background operation
+- **Historical backtester** — 3-phase backtest (rules only / confluence + rules / + LLM) with walk-forward analysis and fee sensitivity sweep
 
 ## Prerequisites
 
@@ -112,6 +118,37 @@ cd frontend && npm run dev
 # Open http://localhost:5173
 ```
 
+## Backtesting
+
+Run a 3-phase historical backtest using 60 days of 5m candles (signals) + 2 years of 1h candles (regime context) sourced from Yahoo Finance:
+
+```bash
+# Standard backtest — rules / confluence+rules / +LLM phases
+pdm run backtest
+
+# Disable LLM (faster, no API cost)
+python -m backtest.run --balance 10000 --no-llm
+
+# Walk-forward analysis (out-of-sample windows)
+python -m backtest.run --no-llm --walk-forward --wf-train 30 --wf-test 7
+
+# Fee sensitivity sweep (find your break-even fee)
+python -m backtest.run --no-llm --fee-sweep
+
+# Custom fee (e.g. Kraken maker rate)
+python -m backtest.run --no-llm --fee 0.0016
+```
+
+**Three phases compared side-by-side:**
+
+| Phase | What runs | Purpose |
+|---|---|---|
+| Phase 1 | Rule engine only | Baseline — how good are the rules alone? |
+| Phase 2 | Confluence gate + rules | Production mode — signal quality filter applied |
+| Phase 3 | Confluence + rules + Gemini LLM | Full pipeline — validates the LLM adds alpha |
+
+Results are saved as `.xlsx` in `backtest/results/` with a per-trade log, equity curve, and config snapshot.
+
 ## Configuration
 
 | Variable | Description | Default |
@@ -123,11 +160,12 @@ cd frontend && npm run dev
 | `KRAKEN_API_SECRET_TRADING` | Trading secret (live mode only) | required for live |
 | `TRADING_MODE` | `paper` or `live` | `paper` |
 | `TRADING_PAIR` | Kraken pair symbol | `BTCUSD` |
-| `MAX_POSITION_PCT` | Max portfolio fraction per trade | `0.05` (5%) |
-| `CONFIDENCE_THRESHOLD` | Minimum AI confidence to consider a trade | `0.75` |
-| `STOP_LOSS_PCT` | Minimum stop-loss floor (ATR-based if larger) | `0.03` (3%) |
+| `MAX_POSITION_PCT` | Max portfolio fraction per trade | `0.10` (10%) |
+| `CONFIDENCE_THRESHOLD` | Minimum AI confidence to consider a trade | `0.65` |
+| `STOP_LOSS_PCT` | Minimum stop-loss floor (ATR-based if larger) | `0.02` (2%) |
 | `DAILY_LOSS_LIMIT_PCT` | Circuit breaker threshold | `0.08` (8%) |
-| `MAX_OPEN_POSITIONS` | Maximum concurrent open positions | `2` |
+| `MAX_OPEN_POSITIONS` | Maximum concurrent open positions | `3` |
+| `CONFLUENCE_MIN_SCORE` | Minimum confluence votes to pass gate (0–8) | `3` |
 | `FAST_LOOP_MINUTES` | Fast loop interval | `15` |
 | `STANDARD_LOOP_MINUTES` | Standard loop interval | `60` |
 | `TREND_LOOP_MINUTES` | Trend/regime refresh interval | `240` |
@@ -140,46 +178,50 @@ cd frontend && npm run dev
 | Loop | Interval | What it does |
 |---|---|---|
 | **Fast loop** | 15 min | Rule engine only — executes immediately if rule confidence ≥ 0.82. Also checks stop/TP on every tick and saves fast-loop decision records to DB. |
-| **Standard loop** | 60 min | Full cycle: fetch multi-TF data → indicators → confluence gate (≥4/8) → Gemini LLM → rule engine → consensus → 3-tier risk → execute. Saves portfolio snapshot on every cycle regardless of trade. |
-| **Trend loop** | 4 hours | Refreshes 4h regime (trending/ranging) used by all other loops as context. |
-| **Shock guard** | Continuous | WebSocket price stream. Emergency closes all positions if price drops 3% in 5 minutes. |
+| **Standard loop** | 60 min | Full cycle: fetch multi-TF data → indicators → regime → confluence gate → OFI → Gemini LLM → narrative context → rule engine → consensus → 3-tier risk → execute. Saves portfolio snapshot on every cycle. |
+| **Trend loop** | 4 hours | Refreshes 5-state market regime used by all other loops as context. |
+| **Shock guard** | Continuous | WebSocket price + order book stream. Emergency closes all positions if price drops 3% in 5 minutes. Accumulates OFI from Level 2 book channel. |
 
 ## Decision Pipeline (Standard Loop)
 
 ```
-1. Fetch OHLCV (15m · 1h · 4h) + live price
-2. Compute 8 indicators (RSI · MACD · BB · VWAP · EMA · ATR · ADX · regime)
-3. Confluence score — if < 4/8 signals agree → HOLD, save record, exit cycle
-4. Build Gemini prompt (indicators + sentiment + reflection + signal breakdown)
-5. LLM decision — action + confidence + reasoning
-6. Rule engine decision — deterministic triggers
-7. Aggregate — both must agree on direction (consensus)
-8. Tier 2 portfolio check — exposure < 15%, open positions < MAX_OPEN_POSITIONS
-9. Tier 3 circuit breaker — halt if daily loss > DAILY_LOSS_LIMIT_PCT
-10. Tier 1 per-trade check — confidence ≥ threshold, position sizing, stop/TP calculation
-11. Execute via Kraken CLI
-12. Save trade + decision + stop/TP to SQLite
+1.  Fetch OHLCV (5m · 1h) + live price
+2.  Compute 10 indicators (RSI · MACD · BB · VWAP · EMA · ATR · ADX · regime · microstructure · volume profile)
+3.  Detect 5-state regime — if VOLATILE → stand aside, save record, exit cycle
+4.  Confluence score — if < CONFLUENCE_MIN_SCORE signals agree → HOLD, save record, exit cycle
+5.  Read OFI score from shock guard WebSocket buffer
+6.  Build Gemini prompt (indicators + sentiment + reflection + signal breakdown)
+7.  LLM decision — action + confidence + reasoning
+8.  Narrative context — confidence modifier + require_higher_confluence flag
+9.  Rule engine decision — deterministic triggers (8 rules)
+10. Aggregate — both LLM and rules must agree on direction (consensus)
+11. Tier 2 portfolio check — exposure cap, open positions < MAX_OPEN_POSITIONS
+12. Tier 3 circuit breaker — halt if daily loss > DAILY_LOSS_LIMIT_PCT
+13. Tier 1 per-trade check — confidence ≥ threshold, position sizing, stop/TP calculation
+14. Execute via Kraken CLI
+15. Save trade + decision + stop/TP + execution quality (slippage) to SQLite
 ```
 
 ## Risk Management
 
 **Tier 1 — Per-Trade Guard**
 - Confidence must meet `CONFIDENCE_THRESHOLD`
-- Position size = `MAX_POSITION_PCT × portfolio_value`
+- Position size = Kelly criterion (half-Kelly) or `MAX_POSITION_PCT × portfolio_value`
 - Stop distance = `max(ATR × 1.5, STOP_LOSS_PCT × entry_price)`
 - Take-profit = `entry ± stop_distance × 2.0` (enforced 2:1 R:R)
 
 **Tier 2 — Portfolio Guard**
-- Max `MAX_OPEN_POSITIONS` concurrent trades (counted from SQLite, not Kraken CLI — reliable in paper mode)
-- Max total exposure = 15% of portfolio (computed as `sum(volume × entry_price) / portfolio_value`)
+- Max `MAX_OPEN_POSITIONS` concurrent trades
+- Max total exposure = 30% of portfolio (computed from open position sizes)
 
 **Tier 3 — Circuit Breaker**
 - Activates when daily P&L drops below `-DAILY_LOSS_LIMIT_PCT`
 - Blocks all new trades until auto-reset at midnight UTC or manual reset
 
 **Shock Guard**
-- Continuous WebSocket price monitoring
+- Continuous WebSocket price + Level 2 order book monitoring
 - If price drops ≥ 3% from its 5-minute high → emergency close all open positions
+- Accumulates Order Flow Imbalance (OFI) from bid/ask quantity deltas
 
 ## API Reference
 
@@ -198,32 +240,41 @@ cd frontend && npm run dev
 
 ```
 backend/
-  config/settings.py        Pydantic settings — all env vars validated at startup
-  data/fetcher.py            Kraken CLI subprocess wrapper (OHLCV, balance, orders)
-  data/sentiment.py          Fear & Greed Index + CoinDesk RSS headlines
-  data/onchain.py            On-chain metrics from Blockchain.info
-  indicators/engine.py       8 technical indicators via pandas-ta
-  indicators/confluence.py   Bull/bear vote scoring (0–8) with per-signal breakdown
-  indicators/regime.py       4h market regime detection (trending / ranging)
-  brain/gemini.py            Gemini Flash LLM — builds prompt, parses JSON response
-  brain/rules.py             Deterministic 4-rule engine
-  brain/aggregator.py        Consensus logic (LLM + rules must agree)
-  brain/reflection.py        Trade memory builder — recent trades injected into LLM context
-  risk/guard.py              Three-tier risk management + ATR stop/TP calculation
-  execution/trader.py        Kraken CLI order placement (paper + live)
-  execution/shock_guard.py   WebSocket flash crash protection
-  memory/store.py            SQLite3 persistence (decisions, trades, snapshots, state)
-  api/app.py                 FastAPI app factory
-  api/routes.py              REST endpoints + Pydantic response models
-  main.py                    Orchestration — all three agent loops + stop/TP monitor
+  config/settings.py          Pydantic settings — all env vars validated at startup
+  data/fetcher.py             Kraken CLI subprocess wrapper (OHLCV, balance, orders)
+  data/sentiment.py           Fear & Greed Index + CoinDesk RSS headlines
+  data/market_data.py         Microstructure: bid/ask spread, order book depth
+  data/onchain.py             On-chain metrics from Blockchain.info
+  indicators/engine.py        10 technical indicators via pandas-ta
+  indicators/confluence.py    Bull/bear vote scoring (0–8) with per-signal breakdown
+  indicators/regime.py        5-state market regime detection (trending/ranging/volatile)
+  indicators/volume_profile.py  Intrabar POC, Value Area High/Low
+  brain/gemini.py             Gemini Flash LLM — builds prompt, parses JSON response
+  brain/rules.py              Deterministic 8-rule engine (event-based + state-based)
+  brain/aggregator.py         Consensus logic (LLM + rules must agree)
+  brain/narrative.py          Narrative context — confidence modifier + tail-risk flag
+  brain/reflection.py         Trade memory builder — recent trades injected into LLM context
+  risk/guard.py               Three-tier risk management + ATR stop/TP calculation
+  execution/trader.py         Kraken CLI order placement (paper + live) + slippage tracking
+  execution/shock_guard.py    WebSocket flash crash protection + OFI accumulation
+  memory/store.py             SQLite3 persistence (decisions, trades, snapshots, state, execution_quality)
+  api/app.py                  FastAPI app factory
+  api/routes.py               REST endpoints + Pydantic response models
+  main.py                     Orchestration — all three agent loops + stop/TP monitor
+
+backtest/
+  data.py                     yfinance OHLCV loader with CSV caching (5m: 60d, 1h: 2y)
+  run.py                      3-phase backtest runner + walk-forward + fee sweep CLI
+  simulator.py                Trade state machine — stop/TP/max-hold exits, P&L, stats
+  report.py                   Excel report writer (per-trade log + equity curve)
 
 frontend/src/
-  pages/DashboardPage.jsx    Main dashboard (status, metrics, price chart)
-  pages/TradesPage.jsx       Full-screen trade log
-  pages/DecisionsPage.jsx    Decision history with AI reasoning
-  components/TradeLog.jsx    Trade table with expanded stop/target/closed-at view
-  components/IndicatorPanel  8 confluence signals with bull/bear/neutral breakdown
-  components/PriceChart      Live price chart via Recharts
+  pages/DashboardPage.jsx     Main dashboard (status, metrics, price chart)
+  pages/TradesPage.jsx        Full-screen trade log
+  pages/DecisionsPage.jsx     Decision history with AI reasoning
+  components/TradeLog.jsx     Trade table with expanded stop/target/closed-at view
+  components/IndicatorPanel   10 confluence signals with bull/bear/neutral breakdown
+  components/PriceChart       Live price chart via Recharts
 ```
 
 ## Docker Volumes (persistent data)
