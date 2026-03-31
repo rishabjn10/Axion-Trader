@@ -242,10 +242,10 @@ def approve_trade(
     # Stop distance: max of ATR-based (adapts to volatility) and configured STOP_LOSS_PCT
     # (percentage floor guarantees the .env setting is always respected).
     # Take profit always maintains a minimum 2:1 R:R ratio relative to the stop.
-    atr_stop = atr * 1.5
+    atr_stop = atr * settings.atr_stop_multiplier
     pct_stop = settings.stop_loss_pct * entry_price
     stop_distance = max(atr_stop, pct_stop)
-    tp_distance = stop_distance * 2.0  # 2:1 R:R relative to actual stop used
+    tp_distance = stop_distance * settings.tp_ratio
 
     logger.debug(
         f"Stop calc: ATR-based=${atr_stop:.2f} ({atr_stop/entry_price:.2%}), "
@@ -268,10 +268,10 @@ def approve_trade(
         return TradeApproval(approved=False, reason=reason)
 
     # R:R ratio = potential profit / potential loss = tp_distance / stop_distance
-    rr_ratio = tp_distance / stop_distance  # Should be 2.0 with our multipliers
-    if rr_ratio < 2.0:
+    rr_ratio = tp_distance / stop_distance  # Should equal settings.tp_ratio
+    if rr_ratio < settings.tp_ratio:
         reason = (
-            f"Risk/reward ratio {rr_ratio:.2f}:1 below minimum 2.0:1. "
+            f"Risk/reward ratio {rr_ratio:.2f}:1 below minimum {settings.tp_ratio:.1f}:1. "
             f"Stop={stop_distance:.2f}, TP={tp_distance:.2f}. Trade rejected."
         )
         logger.warning(f"Tier 1 REJECTED: {reason}")

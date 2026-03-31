@@ -129,6 +129,9 @@ pdm run backtest
 # Disable LLM (faster, no API cost)
 python -m backtest.run --balance 10000 --no-llm
 
+# Limit to last N days of 5m history (default uses all ~60 days)
+python -m backtest.run --no-llm --days 30
+
 # Walk-forward analysis (out-of-sample windows)
 python -m backtest.run --no-llm --walk-forward --wf-train 30 --wf-test 7
 
@@ -137,6 +140,9 @@ python -m backtest.run --no-llm --fee-sweep
 
 # Custom fee (e.g. Kraken maker rate)
 python -m backtest.run --no-llm --fee 0.0016
+
+# Skip AI optimizer (faster, no Gemini API call)
+python -m backtest.run --no-llm --no-optimize
 ```
 
 **Three phases compared side-by-side:**
@@ -149,7 +155,22 @@ python -m backtest.run --no-llm --fee 0.0016
 
 Results are saved as `.xlsx` in `backtest/results/` with a per-trade log, equity curve, and config snapshot.
 
+### AI Strategy Optimizer
+
+After every backtest, the optimizer automatically sends the trade log and current config to Gemini and returns **5 ranked parameter suggestions** — printed to the console and saved as `backtest/results/optimize_PAIR_YYYYMMDD.json`.
+
+Each suggestion includes a rationale and the exact `.env` values to change. To apply one, copy the `changes` block into your `.env` and re-run.
+
+```bash
+# Optimizer runs by default — disable with:
+python -m backtest.run --no-llm --no-optimize
+```
+
 ## Configuration
+
+All strategy parameters are configurable via `.env` — no code changes required. Copy `.env.example` to `.env` and edit.
+
+**Core**
 
 | Variable | Description | Default |
 |---|---|---|
@@ -160,11 +181,11 @@ Results are saved as `.xlsx` in `backtest/results/` with a per-trade log, equity
 | `KRAKEN_API_SECRET_TRADING` | Trading secret (live mode only) | required for live |
 | `TRADING_MODE` | `paper` or `live` | `paper` |
 | `TRADING_PAIR` | Kraken pair symbol | `BTCUSD` |
-| `MAX_POSITION_PCT` | Max portfolio fraction per trade | `0.10` (10%) |
-| `CONFIDENCE_THRESHOLD` | Minimum AI confidence to consider a trade | `0.65` |
-| `STOP_LOSS_PCT` | Minimum stop-loss floor (ATR-based if larger) | `0.02` (2%) |
+| `MAX_POSITION_PCT` | Max portfolio fraction per trade | `0.05` (5%) |
+| `CONFIDENCE_THRESHOLD` | Minimum AI confidence to consider a trade | `0.75` |
+| `STOP_LOSS_PCT` | Minimum stop-loss floor (ATR-based if larger) | `0.03` (3%) |
 | `DAILY_LOSS_LIMIT_PCT` | Circuit breaker threshold | `0.08` (8%) |
-| `MAX_OPEN_POSITIONS` | Maximum concurrent open positions | `3` |
+| `MAX_OPEN_POSITIONS` | Maximum concurrent open positions | `2` |
 | `CONFLUENCE_MIN_SCORE` | Minimum confluence votes to pass gate (0–8) | `3` |
 | `FAST_LOOP_MINUTES` | Fast loop interval | `15` |
 | `STANDARD_LOOP_MINUTES` | Standard loop interval | `60` |
@@ -172,6 +193,27 @@ Results are saved as `.xlsx` in `backtest/results/` with a per-trade log, equity
 | `API_HOST` | FastAPI bind host | `0.0.0.0` |
 | `API_PORT` | FastAPI port | `8000` |
 | `CORS_ORIGINS` | Allowed CORS origins | `http://localhost:5173` |
+
+**Strategy — rule thresholds** (tunable without code changes)
+
+| Variable | Description | Default |
+|---|---|---|
+| `RSI_OVERSOLD` | Rule 1: deep-oversold BUY level | `28` |
+| `RSI_OVERBOUGHT` | Rule 2: overbought SELL level | `72` |
+| `RSI_SOFT_OVERSOLD` | Rule 7: ranging bounce BUY level | `35` |
+| `RSI_SOFT_OVERBOUGHT` | Rule 8: ranging fade SELL level | `65` |
+| `RSI_BULL_MIN` / `RSI_BULL_MAX` | Rule 5: RSI range for bullish momentum | `40` / `65` |
+| `RSI_BEAR_MIN` / `RSI_BEAR_MAX` | Rule 6: RSI range for bearish momentum | `35` / `60` |
+| `ATR_STOP_MULTIPLIER` | Stop distance = ATR × this | `1.5` |
+| `TP_RATIO` | Take-profit distance = stop × this (R:R) | `2.0` |
+| `ADX_STRONG_THRESHOLD` | ADX above this → TRENDING_STRONG | `35` |
+| `ADX_WEAK_THRESHOLD` | ADX above this → TRENDING_WEAK; below → RANGING | `25` |
+| `ATR_VOLATILE_ZSCORE` | ATR z-score above this → VOLATILE (stand aside) | `2.0` |
+| `MAX_HOLD_HOURS` | Max hours to hold a position before forced exit | `48` |
+| `RULE_CONF_EXTREME` | Confidence for Rules 1 & 2 (RSI extreme + BB + MACD) | `0.82` |
+| `RULE_CONF_CROSS` | Confidence for Rules 3 & 4 (EMA cross + regime) | `0.78` |
+| `RULE_CONF_STATE` | Confidence for Rules 5 & 6 (EMA momentum state) | `0.72` |
+| `RULE_CONF_RANGING` | Confidence for Rules 7 & 8 (RSI bounce/fade) | `0.70` |
 
 ## Agent Loops
 
@@ -267,6 +309,7 @@ backtest/
   run.py                      3-phase backtest runner + walk-forward + fee sweep CLI
   simulator.py                Trade state machine — stop/TP/max-hold exits, P&L, stats
   report.py                   Excel report writer (per-trade log + equity curve)
+  optimizer.py                AI optimizer — sends results to Gemini, returns 5 config suggestions
 
 frontend/src/
   pages/DashboardPage.jsx     Main dashboard (status, metrics, price chart)

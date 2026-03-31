@@ -69,3 +69,7 @@ htmlcov/
 # MyPy
 .mypy_cache/
 .claude/
+
+*.csv
+*.xlsx
+*.json

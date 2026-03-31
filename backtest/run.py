@@ -339,7 +339,7 @@ def run_walk_forward(
     test_months:  int = WF_TEST_DAYS,
     step_months:  int = WF_STEP_DAYS,
     fee: float = 0.0026,
-) -> list[dict]:
+) -> tuple[list[dict], list]:
     """
     Run walk-forward analysis by sliding a train/test window across the 5m data.
 
@@ -379,8 +379,9 @@ def run_walk_forward(
     test_len  = test_days  * CANDLES_PER_DAY
     step_len  = step_days  * CANDLES_PER_DAY
 
-    n       = len(df_5m)
-    results = []
+    n          = len(df_5m)
+    results    = []
+    portfolios = []   # collect p2_wf from every window for the optimizer
     window_start = train_len  # first test window starts after train_len candles
 
     while window_start + test_len <= n:
@@ -432,11 +433,12 @@ def run_walk_forward(
             "test_end":   test_end,
             "stats":      p2_wf.compute_stats(),
         })
+        portfolios.append(p2_wf)
 
         window_start += step_len
 
     _print_walk_forward(results)
-    return results
+    return results, portfolios
 
 
 # ── Fee sensitivity sweep ──────────────────────────────────────────────────────
@@ -503,10 +505,12 @@ def run_fee_sweep(
 def run_backtest(
     pair: str = "BTCUSD",
     years: int = 2,
+    days: int = 0,
     starting_balance: float = 10_000.0,
     llm_enabled: bool = True,
     output_dir: Path | None = None,
     fee: float = 0.0026,
+    optimize: bool = True,
 ) -> None:
     if output_dir is None:
         output_dir = Path("backtest/results")
@@ -517,19 +521,24 @@ def run_backtest(
     console.rule("[bold blue]Axion Trader — Backtest[/bold blue]")
     console.print(
         f"  Pair: [bold]{pair}[/bold]  |  "
-        f"Years: {years}  |  "
+        f"{'Last ' + str(days) + 'd' if days > 0 else 'Years: ' + str(years)}  |  "
         f"Balance: ${starting_balance:,.2f}\n"
     )
 
     # ── Load OHLCV data ────────────────────────────────────────────────────────
     console.print("[dim]Loading OHLCV data from Yahoo Finance / cache…[/dim]")
-    df_5m = load_history(pair, 5)         # 60 days of 5m candles (primary signals)
+    df_5m = load_history(pair, 5)         # up to 60 days of 5m candles (primary signals)
     df_1h = load_history(pair, 60, years) # 2 years of 1h candles (regime context)
 
     # Ensure UTC-aware timestamps
     for df in (df_5m, df_1h):
         if df["timestamp"].dt.tz is None:
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+
+    # Trim 5m data to last N days if requested
+    if days > 0:
+        cutoff = df_5m["timestamp"].max() - pd.Timedelta(days=days)
+        df_5m = df_5m[df_5m["timestamp"] >= cutoff].reset_index(drop=True)
 
     n = len(df_5m)
     console.print(
@@ -654,6 +663,12 @@ def run_backtest(
     excel    = write_excel([p1, p2, p3], config_snapshot, out_path)
     console.print(f"\n[green bold]✓ Report saved:[/green bold] {excel}\n")
 
+    if optimize:
+        from backtest.optimizer import run_optimizer
+        run_optimizer([p1, p2, p3], pair, output_dir)
+
+    return [p1, p2, p3]
+
 
 # ── CLI entry point ────────────────────────────────────────────────────────────
 
@@ -662,13 +677,15 @@ def main() -> None:
         description="Axion Trader — 3-phase historical backtest",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--pair",         default="BTCUSD",    help="Trading pair")
-    parser.add_argument("--years",        default=2, type=int, help="Years of history to replay")
+    parser.add_argument("--pair",         default=settings.trading_pair, help="Trading pair (defaults to TRADING_PAIR in .env)")
+    parser.add_argument("--years",        default=2, type=int, help="Years of 1h context history")
+    parser.add_argument("--days",         default=0,  type=int, help="Limit 5m backtest to last N days (0 = use all ~60 days)")
     parser.add_argument("--balance",      default=10_000.0, type=float, help="Starting balance in USD")
     parser.add_argument("--no-llm",       action="store_true", help="Disable Phase 3 Gemini LLM calls")
     parser.add_argument("--output",       default="backtest/results", help="Output directory for .xlsx report")
     parser.add_argument("--fee",          default=0.0026, type=float, help="Per-side trade fee (e.g. 0.0026 = 0.26%%)")
     parser.add_argument("--fee-sweep",    action="store_true", help="Run fee sensitivity analysis across multiple fee levels")
+    parser.add_argument("--no-optimize",  action="store_true", help="Skip AI optimizer after backtest")
     parser.add_argument("--walk-forward", action="store_true", help="Run walk-forward analysis instead of full-period backtest")
     parser.add_argument("--wf-train",     default=WF_TRAIN_DAYS, type=int, help="Walk-forward: train window in days (default 30)")
     parser.add_argument("--wf-test",      default=WF_TEST_DAYS,  type=int, help="Walk-forward: test window in days (default 7)")
@@ -686,10 +703,14 @@ def main() -> None:
         for df in (df_5m, df_1h):
             if df["timestamp"].dt.tz is None:
                 df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        if args.days > 0:
+            cutoff = df_5m["timestamp"].max() - pd.Timedelta(days=args.days)
+            df_5m = df_5m[df_5m["timestamp"] >= cutoff].reset_index(drop=True)
+            console.print(f"  [dim]--days {args.days}: trimmed to {len(df_5m)} 5m candles[/dim]")
         logger.disable("backend")
 
         if args.walk_forward:
-            run_walk_forward(
+            _, wf_portfolios = run_walk_forward(
                 df_5m, df_1h,
                 starting_balance=args.balance,
                 train_months=args.wf_train,
@@ -697,6 +718,9 @@ def main() -> None:
                 step_months=args.wf_step,
                 fee=args.fee,
             )
+            if not args.no_optimize and wf_portfolios:
+                from backtest.optimizer import run_optimizer
+                run_optimizer(wf_portfolios, args.pair, Path(args.output))
 
         if args.fee_sweep:
             run_fee_sweep(df_5m, df_1h, starting_balance=args.balance)
@@ -705,10 +729,12 @@ def main() -> None:
         run_backtest(
             pair=args.pair,
             years=args.years,
+            days=args.days,
             starting_balance=args.balance,
             llm_enabled=not args.no_llm,
             output_dir=Path(args.output),
             fee=args.fee,
+            optimize=not args.no_optimize,
         )
 
 

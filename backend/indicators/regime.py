@@ -163,10 +163,11 @@ def _compute_atr_zscore(df: pd.DataFrame, period: int = 14, z_window: int = 50) 
     return round((float(atr_series.iloc[-1]) - mean) / std, 3)
 
 
-# ── ADX constants ─────────────────────────────────────────────────────────────
-_ADX_STRONG  = 35.0   # Strong trend
-_ADX_WEAK    = 25.0   # Weak/developing trend
-_ATR_Z_VOLATILE = 2.0  # ATR z-score above this → VOLATILE regime
+# ── ADX constants (loaded from settings; .env-configurable) ──────────────────
+from backend.config.settings import settings as _settings  # noqa: E402
+_ADX_STRONG     = _settings.adx_strong_threshold
+_ADX_WEAK       = _settings.adx_weak_threshold
+_ATR_Z_VOLATILE = _settings.atr_volatile_zscore
 
 
 def detect_regime(df_1h: pd.DataFrame, df_4h: pd.DataFrame) -> RegimeContext:

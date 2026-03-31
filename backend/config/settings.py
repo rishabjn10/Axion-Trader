@@ -127,6 +127,88 @@ class Settings(BaseSettings):
         description="Minimum confluence score when narrative flags high tail risk or volatile regime.",
     )
 
+    # ── Rule thresholds ───────────────────────────────────────────────────────
+    rsi_oversold: float = Field(
+        default=28.0, ge=1.0, le=50.0,
+        description="Rule 1: RSI below this triggers deep-oversold BUY signal.",
+    )
+    rsi_overbought: float = Field(
+        default=72.0, ge=50.0, le=99.0,
+        description="Rule 2: RSI above this triggers overbought SELL signal.",
+    )
+    rsi_soft_oversold: float = Field(
+        default=35.0, ge=1.0, le=50.0,
+        description="Rule 7: RSI below this in RANGING market triggers bounce BUY.",
+    )
+    rsi_soft_overbought: float = Field(
+        default=65.0, ge=50.0, le=99.0,
+        description="Rule 8: RSI above this in RANGING market triggers fade SELL.",
+    )
+    rsi_bull_min: float = Field(
+        default=40.0, ge=1.0, le=100.0,
+        description="Rule 5: RSI lower bound for bullish momentum state.",
+    )
+    rsi_bull_max: float = Field(
+        default=65.0, ge=1.0, le=100.0,
+        description="Rule 5: RSI upper bound for bullish momentum (not yet overbought).",
+    )
+    rsi_bear_min: float = Field(
+        default=35.0, ge=1.0, le=100.0,
+        description="Rule 6: RSI lower bound for bearish momentum state.",
+    )
+    rsi_bear_max: float = Field(
+        default=60.0, ge=1.0, le=100.0,
+        description="Rule 6: RSI upper bound for bearish momentum (not yet oversold).",
+    )
+
+    # ── Risk / reward ─────────────────────────────────────────────────────────
+    atr_stop_multiplier: float = Field(
+        default=1.5, ge=0.5, le=5.0,
+        description="ATR multiplier for stop-loss. stop_distance = ATR × this.",
+    )
+    tp_ratio: float = Field(
+        default=2.0, ge=1.0, le=10.0,
+        description="Take-profit distance = stop_distance × this. 2.0 enforces 2:1 R:R.",
+    )
+
+    # ── Regime detection ──────────────────────────────────────────────────────
+    adx_strong_threshold: float = Field(
+        default=35.0, ge=10.0, le=80.0,
+        description="ADX above this → TRENDING_STRONG regime.",
+    )
+    adx_weak_threshold: float = Field(
+        default=25.0, ge=5.0, le=60.0,
+        description="ADX above this (but below strong) → TRENDING_WEAK. Below → RANGING.",
+    )
+    atr_volatile_zscore: float = Field(
+        default=2.0, ge=1.0, le=5.0,
+        description="ATR z-score above this → VOLATILE regime (stand aside).",
+    )
+
+    # ── Position hold limit ───────────────────────────────────────────────────
+    max_hold_hours: int = Field(
+        default=48, ge=1, le=720,
+        description="Maximum hours to hold a position before forced exit (backtest + live).",
+    )
+
+    # ── Rule confidence scores ────────────────────────────────────────────────
+    rule_conf_extreme: float = Field(
+        default=0.82, ge=0.5, le=1.0,
+        description="Confidence for Rules 1 & 2 (RSI extreme + BB + MACD cross).",
+    )
+    rule_conf_cross: float = Field(
+        default=0.78, ge=0.5, le=1.0,
+        description="Confidence for Rules 3 & 4 (EMA cross with regime confirmation).",
+    )
+    rule_conf_state: float = Field(
+        default=0.72, ge=0.5, le=1.0,
+        description="Confidence for Rules 5 & 6 (EMA momentum state + MACD direction).",
+    )
+    rule_conf_ranging: float = Field(
+        default=0.70, ge=0.5, le=1.0,
+        description="Confidence for Rules 7 & 8 (RSI bounce/fade in RANGING regime).",
+    )
+
     # ── Execution ─────────────────────────────────────────────────────────────
     use_limit_orders: bool = Field(
         default=True,

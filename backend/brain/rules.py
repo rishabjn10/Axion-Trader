@@ -39,6 +39,7 @@ from typing import Literal
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.config.settings import settings
 from backend.indicators.engine import IndicatorSnapshot
 from backend.indicators.regime import MarketRegime
 
@@ -105,7 +106,7 @@ def evaluate(snapshot: IndicatorSnapshot, regime: MarketRegime) -> RuleDecision:
     # ── Rule 1: RSI oversold + lower BB + MACD bullish cross ──────────────────
     # Three independent confirmations pointing to the same direction:
     # deep oversold RSI, price testing support band, and fresh momentum cross
-    rsi_oversold = snapshot.rsi < 28
+    rsi_oversold = snapshot.rsi < settings.rsi_oversold
     price_at_lower_bb = snapshot.current_price <= snapshot.bb_lower * 1.005  # Allow 0.5% tolerance
     macd_bullish_cross = snapshot.macd_cross_direction == "bullish"
 
@@ -117,12 +118,12 @@ def evaluate(snapshot: IndicatorSnapshot, regime: MarketRegime) -> RuleDecision:
         )
         return RuleDecision(
             action="buy",
-            confidence=0.82,
+            confidence=settings.rule_conf_extreme,
             triggered_rule="RSI_oversold_BB_MACD",
         )
 
     # ── Rule 2: RSI overbought + upper BB + MACD bearish cross ───────────────
-    rsi_overbought = snapshot.rsi > 72
+    rsi_overbought = snapshot.rsi > settings.rsi_overbought
     price_at_upper_bb = snapshot.current_price >= snapshot.bb_upper * 0.995  # Allow 0.5% tolerance
     macd_bearish_cross = snapshot.macd_cross_direction == "bearish"
 
@@ -134,7 +135,7 @@ def evaluate(snapshot: IndicatorSnapshot, regime: MarketRegime) -> RuleDecision:
         )
         return RuleDecision(
             action="sell",
-            confidence=0.82,
+            confidence=settings.rule_conf_extreme,
             triggered_rule="RSI_overbought_BB_MACD",
         )
 
@@ -152,7 +153,7 @@ def evaluate(snapshot: IndicatorSnapshot, regime: MarketRegime) -> RuleDecision:
         )
         return RuleDecision(
             action="buy",
-            confidence=0.78,
+            confidence=settings.rule_conf_cross,
             triggered_rule="EMA_cross_uptrend",
         )
 
@@ -167,7 +168,7 @@ def evaluate(snapshot: IndicatorSnapshot, regime: MarketRegime) -> RuleDecision:
         )
         return RuleDecision(
             action="sell",
-            confidence=0.78,
+            confidence=settings.rule_conf_cross,
             triggered_rule="EMA_cross_downtrend",
         )
 
@@ -177,7 +178,7 @@ def evaluate(snapshot: IndicatorSnapshot, regime: MarketRegime) -> RuleDecision:
     # Only in bullish regimes to avoid whipsaws in ranging/down markets.
     ema_bullish_state = snapshot.ema_fast > snapshot.ema_slow
     macd_positive     = snapshot.macd_histogram > 0
-    rsi_mid_bull      = 40 <= snapshot.rsi <= 65
+    rsi_mid_bull      = settings.rsi_bull_min <= snapshot.rsi <= settings.rsi_bull_max
 
     if ema_bullish_state and macd_positive and rsi_mid_bull and regime.is_bullish:
         logger.info(
@@ -187,14 +188,14 @@ def evaluate(snapshot: IndicatorSnapshot, regime: MarketRegime) -> RuleDecision:
         )
         return RuleDecision(
             action="buy",
-            confidence=0.72,
+            confidence=settings.rule_conf_state,
             triggered_rule="EMA_momentum_bull",
         )
 
     # ── Rule 6: EMA bearish state + MACD negative momentum + RSI mid-range ──────
     ema_bearish_state = snapshot.ema_fast < snapshot.ema_slow
     macd_negative     = snapshot.macd_histogram < 0
-    rsi_mid_bear      = 35 <= snapshot.rsi <= 60
+    rsi_mid_bear      = settings.rsi_bear_min <= snapshot.rsi <= settings.rsi_bear_max
 
     if ema_bearish_state and macd_negative and rsi_mid_bear and regime.is_bearish:
         logger.info(
@@ -204,7 +205,7 @@ def evaluate(snapshot: IndicatorSnapshot, regime: MarketRegime) -> RuleDecision:
         )
         return RuleDecision(
             action="sell",
-            confidence=0.72,
+            confidence=settings.rule_conf_state,
             triggered_rule="EMA_momentum_bear",
         )
 
@@ -212,7 +213,7 @@ def evaluate(snapshot: IndicatorSnapshot, regime: MarketRegime) -> RuleDecision:
     # In ranging markets, RSI < 35 near the lower end of a range often means
     # a bounce back to the mean is coming. VWAP below price confirms discount.
     # Positive MACD histogram confirms the momentum is already turning.
-    rsi_oversold_soft = snapshot.rsi < 35
+    rsi_oversold_soft = snapshot.rsi < settings.rsi_soft_oversold
     price_below_vwap  = snapshot.vwap > 0 and snapshot.current_price < snapshot.vwap
     in_ranging        = regime == MarketRegime.RANGING
 
@@ -224,12 +225,12 @@ def evaluate(snapshot: IndicatorSnapshot, regime: MarketRegime) -> RuleDecision:
         )
         return RuleDecision(
             action="buy",
-            confidence=0.70,
+            confidence=settings.rule_conf_ranging,
             triggered_rule="RSI_bounce_ranging",
         )
 
     # ── Rule 8: RSI overbought fade + price above VWAP in ranging market ─────────
-    rsi_overbought_soft = snapshot.rsi > 65
+    rsi_overbought_soft = snapshot.rsi > settings.rsi_soft_overbought
     price_above_vwap    = snapshot.vwap > 0 and snapshot.current_price > snapshot.vwap
 
     if rsi_overbought_soft and price_above_vwap and macd_negative and in_ranging:
@@ -240,7 +241,7 @@ def evaluate(snapshot: IndicatorSnapshot, regime: MarketRegime) -> RuleDecision:
         )
         return RuleDecision(
             action="sell",
-            confidence=0.70,
+            confidence=settings.rule_conf_ranging,
             triggered_rule="RSI_fade_ranging",
         )
 

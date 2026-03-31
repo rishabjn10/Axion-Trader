@@ -45,7 +45,7 @@ from backend.config.settings import settings
 from backend.data.sentiment import SentimentSnapshot
 
 _client = genai.Client(api_key=settings.gemini_api_key)
-_MODEL  = "gemini-2.0-flash-lite"
+_MODEL  = "gemini-3.1-flash-lite-preview"
 
 _SYSTEM_PROMPT = """You are a macro crypto market analyst. Your job is NOT to make trading decisions.
 Your job is to synthesise market narrative, identify tail risks, and assess whether current

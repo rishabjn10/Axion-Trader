@@ -15,9 +15,10 @@ from typing import Literal
 
 import pandas as pd
 
+from backend.config.settings import settings
+
 TAKER_FEE        = 0.0026  # Kraken standard taker fee: 0.26% per side (default)
-MAX_HOLD_CANDLES = 576     # Max 5m candles a position may stay open (576 × 5m = 48h).
-                           # 48h gives trends enough time to reach TP before forced exit.
+MAX_HOLD_CANDLES = settings.max_hold_hours * 12  # 12 five-minute candles per hour
 
 
 # ── Data classes ───────────────────────────────────────────────────────────────
